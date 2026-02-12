@@ -21,6 +21,7 @@ python-server/workspace/yandere_config.json
 python-server/workspace/cron.json
 python-server/workspace/sessions/
 python-server/workspace/*.log
+python-server/workspace/IDENTITY.md
 
 # Logs
 *.log
