@@ -11,6 +11,7 @@ __pycache__/
 venv/
 .venv/
 .env
+python-server/python-embed/
 
 # Workspace & User Data
 python-server/workspace/memory/

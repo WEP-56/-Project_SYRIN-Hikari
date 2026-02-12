@@ -49,7 +49,7 @@ let isQuitting = false;
 function getPythonPath(): string {
   // In production, use bundled Python
   if (app.isPackaged) {
-    const pythonExe = path.join(process.resourcesPath, 'python-server', 'python.exe');
+    const pythonExe = path.join(process.resourcesPath, 'python-server', 'python-embed', 'python.exe');
     if (fs.existsSync(pythonExe)) {
       return pythonExe;
     }
@@ -76,6 +76,8 @@ function startPythonServer(): Promise<void> {
     console.log(`Script: ${scriptPath}`);
     
     if (!fs.existsSync(scriptPath)) {
+      // 如果没有找到脚本，可能是因为 Python 环境问题，尝试直接 reject
+      // 但在开发环境，我们可能不应该这么快失败
       reject(new Error(`Server script not found: ${scriptPath}`));
       return;
     }
@@ -91,11 +93,20 @@ function startPythonServer(): Promise<void> {
     };
     
     // Start Python process
-    pythonProcess = spawn(pythonPath, [scriptPath], {
-      env,
-      detached: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    try {
+        pythonProcess = spawn(pythonPath, [scriptPath], {
+          env,
+          detached: false,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+    } catch (e: any) {
+        if (e.code === 'ENOENT') {
+            reject(new Error(`无法启动后端服务: spawn ${pythonPath} ENOENT\n\n请确保已安装 Python 和必要的依赖。`));
+            return;
+        }
+        reject(e);
+        return;
+    }
     
     let serverReady = false;
     let output = '';
@@ -138,9 +149,13 @@ function startPythonServer(): Promise<void> {
       }
     });
     
-    pythonProcess.on('error', (err) => {
+    pythonProcess.on('error', (err: any) => {
       console.error('Failed to start Python server:', err);
-      reject(err);
+      if (err.code === 'ENOENT') {
+         reject(new Error(`无法启动后端服务: spawn ${pythonPath} ENOENT\n\n请确保已安装 Python 和必要的依赖。`));
+      } else {
+         reject(err);
+      }
     });
     
     // HTTP health check as backup detection method

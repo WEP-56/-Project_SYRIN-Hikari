@@ -49,14 +49,22 @@
     },
     "files": [
       "dist/**/*",
-      "python-server/**/*",
       "assets/**/*",
-      "node_modules/**/*"
+      "node_modules/**/*",
+      "!python-server/**/*",
+      "!nanobot-main/**/*"
     ],
     "extraResources": [
       {
         "from": "python-server",
         "to": "python-server",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "nanobot-main",
+        "to": "nanobot-main",
         "filter": [
           "**/*"
         ]

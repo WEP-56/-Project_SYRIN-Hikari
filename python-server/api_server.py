@@ -14,7 +14,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 # Add nanobot to path
-NANOBOT_PATH = Path(__file__).parent.parent / "nanobot-main"
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
+
+NANOBOT_PATH = CURRENT_DIR.parent / "nanobot-main"
 sys.path.insert(0, str(NANOBOT_PATH))
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks

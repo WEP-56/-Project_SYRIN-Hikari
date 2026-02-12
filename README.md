@@ -17,6 +17,8 @@
 
 ---
 
+> **注意，此项目偏向自用，我是一名学生/独立开发者，想拥有一个属于自己的、性格独特的数字生命体，而不是一个通用的助手。这个项目不会接受关于性格调整，人设改变等请求，如果您有自己的设计，请自行 fork 项目。但欢迎反馈使用中遇到的问题，需要的其他功能，我会尽力解决。**
+
 ## 💫 项目定位
 
 **Project SYRIN** (原名 Yandere Assistant) 是一款以 **人格陪伴 + 情绪价值 + 长期记忆** 为核心设计理念的 Windows 桌面 AI 伴侣。
@@ -132,6 +134,25 @@ cd ..
 npm run dev
 ```
 
+4. 自行打包
+下载 Python 嵌入包 :
+- 下载 Python 3.11 Windows embeddable package (64-bit) 。
+- 将压缩包解压到项目目录： ..\python-server\python-embed\ 。
+- 确保 python.exe 位于 ..\python-server\python-embed\python.exe 。
+
+安装依赖到嵌入包 :
+- 打开终端，进入 python-embed 目录。
+- 修改 python311._pth 文件：用记事本打开，找到 #import site ，去掉前面的 # 号，保存。
+- 下载 get-pip.py : curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+- 安装 pip: .\python.exe get-pip.py
+- 安装项目依赖: .\python.exe -m pip install -r ..\requirements.txt
+
+开始打包 Windows 版本
+```bash
+cd ../../
+npm run package:win
+```
+
 ---
 
 ## 📂 项目结构
@@ -169,4 +190,31 @@ Project SYRIN 是一个开源项目，欢迎任何形式的贡献！
 
 ## 📄 License
 
-MIT License
+Project SYRIN is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🌟 Acknowledgements
+
+- [LiteLLM](https://github.com/litellm/litellm) - 用于模型推理的轻量级库
+- [nanobot](https://github.com/nanobot/nanobot) - 基于 LiteLLM 的 Agent 框架
+- [Electron](https://www.electronjs.org/) - 跨平台桌面应用框架
+- [React](https://reactjs.org/) - 用于构建用户界面的 JavaScript 库
+
+---
+
+## 📝 注意事项
+
+- 本项目仅用于学习和研究目的，不建议在生产环境中使用。
+- 由于模型推理的计算资源需求，注意您的tokens消费。
+
+---
+
+## 🔓 免责声明
+
+本项目的开发者不对因使用本项目而导致的任何直接或间接损失负责。请在使用前充分理解项目的风险和限制。
+
+---
+
+## 🌐 项目地址
+暂无
