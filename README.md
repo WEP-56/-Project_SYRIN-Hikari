@@ -6,10 +6,13 @@
 ---
 
 <p align="center">
-  <img src="./docs/assets/banner.png" alt="banner" width="80%" />
+  <img src="./img/ico.jpg" alt="banner" width="80%" />
 </p>
 
 <p align="center">
+  <a href="#-特性">特性</a> •
+  <a href="#-快速开始">快速开始</a> •
+  <a href="#-项目结构">项目结构</a> •
   <a href="#-特性">特性</a> •
   <a href="#-快速开始">快速开始</a> •
   <a href="#-项目结构">项目结构</a> •
@@ -65,6 +68,16 @@
 
 ---
 
+## 🛠️ 技术栈
+
+*   **前端**: Electron + React + TypeScript + Vite + Tailwind CSS
+*   **后端**: Python 3.11+ + FastAPI
+*   **AI 核心**: Nanobot Framework (基于 LiteLLM)
+*   **向量数据库**: SQLite + JSON (轻量级本地存储)
+*   **进程通信**: HTTP REST API (Electron <-> Python)
+
+---
+
 ## 🧬 与 nanobot 的能力对比
 
 ### ✅ 已支持（Supported）
@@ -102,7 +115,7 @@
 
 1. 克隆项目
 ```bash
-git clone https://github.com/your-repo/project-syrin.git
+git clone https://github.com/WEP-56/-Project_SYRIN-Hikari.git
 cd project-syrin
 ```
 
@@ -146,15 +159,18 @@ project-syrin/
 └── package.json            # 项目配置
 ```
 
-## 数据完全存储于本地
-- soul_db.json : 核心存档！存储了 好感度、情绪状态、用户画像 等灵魂引擎数据。
-- yandere_memory.db : 长期记忆数据库（向量存储）。
-- cron.json : 存储了所有定时提醒和主动交互任务。
-- IDENTITY.md : 动态生成的自我认知文件（删除后重启会自动重新生成）。
-- memory/MEMORY.md : 文本形式的记忆摘要。
-- sandbox/ 文件夹下的所有内容 : 之前运行代码时生成的临时脚本和文件。
-（可选） yandere_config.json : 配置文件。如果您想保留 API Key 和模型设置，请 不要 删除此文件；如果想完全重置，可以删除。
+---
 
+## 🤝 参与共建
+
+Project SYRIN 是一个开源项目，欢迎任何形式的贡献！
+
+*   **QQ**: 1484413790
+*   **邮箱**: 1484413790@qq.com
+
+如果您有好的想法、建议或发现了 Bug，欢迎提交 Issue 或 Pull Request。让我们一起让 Hikari 变得更美好！✨
+
+---
 
 ## 📄 License
 
