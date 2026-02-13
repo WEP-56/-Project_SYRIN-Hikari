@@ -1,15 +1,18 @@
-"""Cron service for scheduling agent tasks."""
+"""Cron service for scheduling agent tasks using SQLite storage."""
 
 import asyncio
 import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, List, Optional
 
 from loguru import logger
 
-from nanobot.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
+from nanobot.cron.types import CronJob, CronJobState, CronPayload, CronSchedule
+from nanobot.storage.db import Database
+from nanobot.storage.models import CronJobModel
+from nanobot.session.manager import SessionManager
 
 
 def _now_ms() -> int:
@@ -44,137 +47,134 @@ class CronService:
     
     def __init__(
         self,
-        store_path: Path,
+        db: Database,
+        session_manager: SessionManager,
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
     ):
-        self.store_path = store_path
-        self.on_job = on_job  # Callback to execute job, returns response text
-        self._store: CronStore | None = None
+        self.db = db
+        self.session_manager = session_manager
+        self.on_job = on_job
         self._timer_task: asyncio.Task | None = None
         self._running = False
+        self._retry_timers: dict[str, asyncio.TimerHandle] = {} # For busy retry
     
-    def _load_store(self) -> CronStore:
-        """Load jobs from disk."""
-        if self._store:
-            return self._store
+    def _model_to_job(self, model: CronJobModel) -> CronJob:
+        """Convert DB model to CronJob type."""
+        # Parse schedule
+        sched_dict = model.schedule
+        schedule = CronSchedule(
+            kind=sched_dict.get("kind", "every"),
+            at_ms=sched_dict.get("at_ms"),
+            every_ms=sched_dict.get("every_ms"),
+            expr=sched_dict.get("expr"),
+            tz=sched_dict.get("tz"),
+        )
         
-        if self.store_path.exists():
-            try:
-                data = json.loads(self.store_path.read_text())
-                jobs = []
-                for j in data.get("jobs", []):
-                    jobs.append(CronJob(
-                        id=j["id"],
-                        name=j["name"],
-                        enabled=j.get("enabled", True),
-                        schedule=CronSchedule(
-                            kind=j["schedule"]["kind"],
-                            at_ms=j["schedule"].get("atMs"),
-                            every_ms=j["schedule"].get("everyMs"),
-                            expr=j["schedule"].get("expr"),
-                            tz=j["schedule"].get("tz"),
-                        ),
-                        payload=CronPayload(
-                            kind=j["payload"].get("kind", "agent_turn"),
-                            message=j["payload"].get("message", ""),
-                            deliver=j["payload"].get("deliver", False),
-                            channel=j["payload"].get("channel"),
-                            to=j["payload"].get("to"),
-                        ),
-                        state=CronJobState(
-                            next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
-                            last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
-                            last_status=j.get("state", {}).get("lastStatus"),
-                            last_error=j.get("state", {}).get("lastError"),
-                        ),
-                        created_at_ms=j.get("createdAtMs", 0),
-                        updated_at_ms=j.get("updatedAtMs", 0),
-                        delete_after_run=j.get("deleteAfterRun", False),
-                    ))
-                self._store = CronStore(jobs=jobs)
-            except Exception as e:
-                logger.warning(f"Failed to load cron store: {e}")
-                self._store = CronStore()
-        else:
-            self._store = CronStore()
+        # Parse payload
+        pay_dict = model.payload
+        payload = CronPayload(
+            kind=pay_dict.get("kind", "agent_turn"),
+            message=pay_dict.get("message", ""),
+            deliver=pay_dict.get("deliver", False),
+            channel=pay_dict.get("channel"),
+            to=pay_dict.get("to"),
+        )
         
-        return self._store
-    
-    def _save_store(self) -> None:
-        """Save jobs to disk."""
-        if not self._store:
-            return
-        
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        data = {
-            "version": self._store.version,
-            "jobs": [
-                {
-                    "id": j.id,
-                    "name": j.name,
-                    "enabled": j.enabled,
-                    "schedule": {
-                        "kind": j.schedule.kind,
-                        "atMs": j.schedule.at_ms,
-                        "everyMs": j.schedule.every_ms,
-                        "expr": j.schedule.expr,
-                        "tz": j.schedule.tz,
-                    },
-                    "payload": {
-                        "kind": j.payload.kind,
-                        "message": j.payload.message,
-                        "deliver": j.payload.deliver,
-                        "channel": j.payload.channel,
-                        "to": j.payload.to,
-                    },
-                    "state": {
-                        "nextRunAtMs": j.state.next_run_at_ms,
-                        "lastRunAtMs": j.state.last_run_at_ms,
-                        "lastStatus": j.state.last_status,
-                        "lastError": j.state.last_error,
-                    },
-                    "createdAtMs": j.created_at_ms,
-                    "updatedAtMs": j.updated_at_ms,
-                    "deleteAfterRun": j.delete_after_run,
-                }
-                for j in self._store.jobs
-            ]
+        return CronJob(
+            id=model.id,
+            name=model.name,
+            enabled=model.enabled,
+            session_id=model.session_id,
+            schedule=schedule,
+            payload=payload,
+            state=CronJobState(
+                next_run_at_ms=model.next_run_at,
+                # We don't store last_run/error in main table for now or we do?
+                # The model has basic fields. We might need to extend model or store state in meta.
+                # For now, let's just use what we have.
+            ),
+            created_at_ms=model.created_at,
+            updated_at_ms=model.updated_at,
+            # delete_after_run needs to be stored! 
+            # Currently CronJobModel doesn't have delete_after_run column.
+            # We can put it in payload or schedule or add a column.
+            # Let's put it in payload for now as a workaround or assume False.
+            delete_after_run=pay_dict.get("delete_after_run", False)
+        )
+
+    def _job_to_model(self, job: CronJob) -> CronJobModel:
+        """Convert CronJob type to DB model."""
+        schedule_dict = {
+            "kind": job.schedule.kind,
+            "at_ms": job.schedule.at_ms,
+            "every_ms": job.schedule.every_ms,
+            "expr": job.schedule.expr,
+            "tz": job.schedule.tz,
         }
         
-        self.store_path.write_text(json.dumps(data, indent=2))
-    
+        payload_dict = {
+            "kind": job.payload.kind,
+            "message": job.payload.message,
+            "deliver": job.payload.deliver,
+            "channel": job.payload.channel,
+            "to": job.payload.to,
+            "delete_after_run": job.delete_after_run # Store here
+        }
+        
+        return CronJobModel(
+            id=job.id,
+            session_id=job.session_id or "", # Must have session_id
+            name=job.name,
+            schedule_json=json.dumps(schedule_dict),
+            payload_json=json.dumps(payload_dict),
+            next_run_at=job.state.next_run_at_ms,
+            enabled=job.enabled,
+            created_at=job.created_at_ms,
+            updated_at=job.updated_at_ms
+        )
+
     async def start(self) -> None:
         """Start the cron service."""
         self._running = True
-        self._load_store()
-        self._recompute_next_runs()
-        self._save_store()
+        
+        # Check for missed jobs (system resume)
+        self._handle_missed_jobs()
+        
         self._arm_timer()
-        logger.info(f"Cron service started with {len(self._store.jobs if self._store else [])} jobs")
-    
+        logger.info("Cron service started")
+
     def stop(self) -> None:
         """Stop the cron service."""
         self._running = False
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
-    
-    def _recompute_next_runs(self) -> None:
-        """Recompute next run times for all enabled jobs."""
-        if not self._store:
-            return
+
+    def _handle_missed_jobs(self) -> None:
+        """Check for jobs that should have run but didn't (e.g. system sleep)."""
         now = _now_ms()
-        for job in self._store.jobs:
-            if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
-    
+        # Get all enabled jobs with next_run_at < now
+        due_jobs = self.db.get_due_jobs(now)
+        
+        for model in due_jobs:
+            job = self._model_to_job(model)
+            logger.warning(f"Cron: Missed job '{job.name}' (due {job.state.next_run_at_ms}, now {now})")
+            
+            # Logic for missed jobs:
+            # 1. If it's a one-off ("at"), it's missed. Maybe notify user?
+            # 2. If it's recurring ("every"/"cron"), we might want to run it NOW or skip to next.
+            # For safety, let's run it now (it will be caught by _on_timer anyway if we don't change next_run).
+            # But _on_timer handles execution.
+            pass
+
     def _get_next_wake_ms(self) -> int | None:
         """Get the earliest next run time across all jobs."""
-        if not self._store:
-            return None
-        times = [j.state.next_run_at_ms for j in self._store.jobs 
-                 if j.enabled and j.state.next_run_at_ms]
+        # We can query DB for min(next_run_at) where enabled=1
+        # But for now, let's fetch all active jobs.
+        # Optimization: Add DB method get_next_run_time()
+        # For now, listing is okay for small number of jobs.
+        jobs = self.db.list_jobs()
+        times = [j.next_run_at for j in jobs if j.enabled and j.next_run_at]
         return min(times) if times else None
     
     def _arm_timer(self) -> None:
@@ -198,60 +198,88 @@ class CronService:
     
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
-        if not self._store:
+        if not self._running:
             return
-        
+            
         now = _now_ms()
-        due_jobs = [
-            j for j in self._store.jobs
-            if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
-        ]
+        due_models = self.db.get_due_jobs(now)
         
-        for job in due_jobs:
+        for model in due_models:
+            job = self._model_to_job(model)
             await self._execute_job(job)
         
-        self._save_store()
         self._arm_timer()
-    
+
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
+        # 1. Session Binding Check
+        if not job.session_id:
+            logger.error(f"Cron: Job '{job.name}' has no session_id. Disabling.")
+            job.enabled = False
+            self.db.update_job(self._job_to_model(job))
+            return
+
+        session = self.session_manager.get_by_id(job.session_id)
+        if not session:
+            logger.warning(f"Cron: Session {job.session_id} not found for job '{job.name}'. Disabling.")
+            job.enabled = False
+            self.db.update_job(self._job_to_model(job))
+            return
+
+        # 2. Busy Guard Check
+        if getattr(session, "is_processing", False):
+            logger.info(f"Cron: Session {job.session_id} is busy. Rescheduling job '{job.name}' in 5s.")
+            # Reschedule logic: Don't change next_run_at in DB (so it stays due), 
+            # but wait 5s before retrying this specific job loop?
+            # Or better: push next_run_at by 5s.
+            job.state.next_run_at_ms = _now_ms() + 5000
+            self.db.update_job(self._job_to_model(job))
+            return
+
+        # 3. Execution
         start_ms = _now_ms()
         logger.info(f"Cron: executing job '{job.name}' ({job.id})")
         
         try:
-            response = None
             if self.on_job:
-                response = await self.on_job(job)
-            
-            job.state.last_status = "ok"
-            job.state.last_error = None
+                await self.on_job(job)
             logger.info(f"Cron: job '{job.name}' completed")
             
         except Exception as e:
-            job.state.last_status = "error"
-            job.state.last_error = str(e)
             logger.error(f"Cron: job '{job.name}' failed: {e}")
         
-        job.state.last_run_at_ms = start_ms
+        # 4. Update State (Next Run)
         job.updated_at_ms = _now_ms()
         
-        # Handle one-shot jobs
+        if job.delete_after_run:
+             logger.info(f"Cron: Deleting job '{job.name}' after run")
+             self.db.delete_job(job.id)
+             return
+             
         if job.schedule.kind == "at":
-            if job.delete_after_run:
-                self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
-            else:
-                job.enabled = False
-                job.state.next_run_at_ms = None
+            # Native one-shot -> Disable
+            job.enabled = False
+            job.state.next_run_at_ms = None
         else:
             # Compute next run
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
-    
+            next_run = _compute_next_run(job.schedule, _now_ms())
+            
+            # Safety check: Minimum 1s delay
+            if next_run and next_run <= _now_ms():
+                 next_run = _now_ms() + 1000 
+                 
+            job.state.next_run_at_ms = next_run
+            
+        self.db.update_job(self._job_to_model(job))
+
     # ========== Public API ==========
     
     def list_jobs(self, include_disabled: bool = False) -> list[CronJob]:
         """List all jobs."""
-        store = self._load_store()
-        jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
+        models = self.db.list_jobs()
+        jobs = [self._model_to_job(m) for m in models]
+        if not include_disabled:
+            jobs = [j for j in jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float('inf'))
     
     def add_job(
@@ -263,15 +291,19 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
+        session_id: str | None = None,
     ) -> CronJob:
         """Add a new job."""
-        store = self._load_store()
+        if not session_id:
+            raise ValueError("session_id is required for cron jobs")
+
         now = _now_ms()
         
         job = CronJob(
             id=str(uuid.uuid4())[:8],
             name=name,
             enabled=True,
+            session_id=session_id,
             schedule=schedule,
             payload=CronPayload(
                 kind="agent_turn",
@@ -286,61 +318,39 @@ class CronService:
             delete_after_run=delete_after_run,
         )
         
-        store.jobs.append(job)
-        self._save_store()
+        model = self._job_to_model(job)
+        self.db.create_job(model)
         self._arm_timer()
         
-        logger.info(f"Cron: added job '{name}' ({job.id})")
+        logger.info(f"Cron: added job '{name}' (session: {session_id})")
         return job
     
     def remove_job(self, job_id: str) -> bool:
-        """Remove a job by ID."""
-        store = self._load_store()
-        before = len(store.jobs)
-        store.jobs = [j for j in store.jobs if j.id != job_id]
-        removed = len(store.jobs) < before
-        
-        if removed:
-            self._save_store()
-            self._arm_timer()
-            logger.info(f"Cron: removed job {job_id}")
-        
-        return removed
-    
+        """Remove a job."""
+        res = self.db.delete_job(job_id)
+        self._arm_timer()
+        return res
+
     def enable_job(self, job_id: str, enabled: bool = True) -> CronJob | None:
         """Enable or disable a job."""
-        store = self._load_store()
-        for job in store.jobs:
-            if job.id == job_id:
-                job.enabled = enabled
-                job.updated_at_ms = _now_ms()
-                if enabled:
-                    job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
-                else:
-                    job.state.next_run_at_ms = None
-                self._save_store()
-                self._arm_timer()
-                return job
-        return None
-    
+        model = self.db.get_job(job_id)
+        if not model:
+            return None
+        
+        model.enabled = enabled
+        self.db.update_job(model)
+        self._arm_timer()
+        return self._model_to_job(model)
+
     async def run_job(self, job_id: str, force: bool = False) -> bool:
         """Manually run a job."""
-        store = self._load_store()
-        for job in store.jobs:
-            if job.id == job_id:
-                if not force and not job.enabled:
-                    return False
-                await self._execute_job(job)
-                self._save_store()
-                self._arm_timer()
-                return True
-        return False
-    
-    def status(self) -> dict:
-        """Get service status."""
-        store = self._load_store()
-        return {
-            "enabled": self._running,
-            "jobs": len(store.jobs),
-            "next_wake_at_ms": self._get_next_wake_ms(),
-        }
+        model = self.db.get_job(job_id)
+        if not model:
+            return False
+            
+        if not model.enabled and not force:
+            return False
+            
+        job = self._model_to_job(model)
+        await self._execute_job(job)
+        return True

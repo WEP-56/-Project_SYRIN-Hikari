@@ -23,6 +23,10 @@ python-server/workspace/cron.json
 python-server/workspace/sessions/
 python-server/workspace/*.log
 python-server/workspace/IDENTITY.md
+AionUi-main
+test_workspace
+python-server/workspace/data/sessions
+REFACTOR_PLAN.md
 
 # Logs
 *.log

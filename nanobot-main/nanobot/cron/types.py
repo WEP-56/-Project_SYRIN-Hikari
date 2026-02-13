@@ -44,6 +44,7 @@ class CronJob:
     id: str
     name: str
     enabled: bool = True
+    session_id: str | None = None  # Bound session ID
     schedule: CronSchedule = field(default_factory=lambda: CronSchedule(kind="every"))
     payload: CronPayload = field(default_factory=CronPayload)
     state: CronJobState = field(default_factory=CronJobState)

@@ -225,4 +225,17 @@ export const api = {
       };
     }
   },
+
+  async resetSystem(): Promise<{success: boolean, message?: string, error?: string}> {
+    try {
+        const response = await apiClient.post('/system/reset', null, { params: { confirm: true } });
+        return response.data;
+    } catch (error: any) {
+        console.error('Reset system error:', error);
+        return { 
+            success: false, 
+            error: error.response?.data?.detail || error.message || 'Reset failed' 
+        };
+    }
+  },
 };

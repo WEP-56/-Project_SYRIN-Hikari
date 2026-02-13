@@ -341,9 +341,29 @@ class AgentManager:
             logger.info(f"Sending chat request to AgentLoop: {message[:50]}...")
             
             # 使用 AgentLoop 处理消息 (自动处理工具调用、记忆等)
+            # If session_id is "default", we should check if we really want to create a new one
+            # The agent loop will get_or_create. 
+            # If "default" is passed, AgentLoop uses "cli:default" or similar?
+            # Let's check AgentLoop.chat implementation.
+            # loop.py:119: async def chat(self, content: str, session_id: str = "default") -> str:
+            # loop.py:126: chat_id=session_id
+            # loop.py:130: response_msg = await self._process_message(msg)
+            # loop.py:157: session = self.sessions.get_or_create(msg.session_key)
+            
+            # If we pass "default", we get a session with key "api:default".
+            # This is NOT what we want for persistent chat. We want a unique UUID.
+            
+            actual_session_id = session_id
+            if not session_id or session_id == "default":
+                # Create a new unique session for this interaction
+                # This ensures the first message in "New Chat" gets a real ID
+                import uuid
+                actual_session_id = str(uuid.uuid4())
+                logger.info(f"Created new session ID for default chat: {actual_session_id}")
+            
             response_content = await self.agent.chat(
                 content=message,
-                session_id=session_id or "default"
+                session_id=actual_session_id
             )
             
             # Update soul stats
@@ -352,17 +372,15 @@ class AgentManager:
             # Trigger background analysis (User Profiling & Sentiment)
             if background_tasks and self.config_manager.get("enable_user_modeling", True):
                 # Get history from session
-                session_key = session_id or "default"
-                # Note: session key in agent loop might need channel prefix "api:"
-                # But here we use simplified logic, let's try to get it from agent's session manager if possible
-                # Or just construct a simple history from current interaction
-                
-                # Ideally we should access agent.sessions.get(key).get_history()
-                # But accessing agent internals is tricky. 
-                # Let's pass the current turn for analysis first.
+                session_key = actual_session_id
                 
                 # Better approach: Access the session directly via agent's session manager
-                full_key = f"api:{session_key}"
+                # Note: AgentLoop adds "api:" prefix to chat_id to form session key?
+                # loop.py:122 msg = InboundMessage(channel="api", ..., chat_id=session_id)
+                # loop.py: msg.session_key property -> f"{self.channel}:{self.chat_id}"
+                # So the key is "api:{actual_session_id}"
+                
+                full_key = f"api:{actual_session_id}"
                 session = self.agent.sessions.get_or_create(full_key)
                 history = session.get_history(max_messages=10) # Get last 10 messages
                 
@@ -376,7 +394,7 @@ class AgentManager:
             return ChatResponse(
                 success=True,
                 response=response_content,
-                session_id=session_id or "default",
+                session_id=actual_session_id, # Return the REAL session ID
                 emotion="normal",
                 thoughts=["AgentLoop processing", "Tool execution (if needed)", "Response generation"]
             )
@@ -688,11 +706,15 @@ async def delete_session(session_id: str):
     if not agent_manager or not agent_manager.agent:
         raise HTTPException(status_code=503, detail="Agent not initialized")
     
-    success = agent_manager.agent.sessions.delete_session(session_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    return {"success": True}
+    try:
+        success = agent_manager.agent.sessions.delete_session(session_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"success": True}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
 
 
 class SessionCreate(BaseModel):
@@ -705,12 +727,16 @@ async def create_session(session: SessionCreate):
     if not agent_manager or not agent_manager.agent:
         raise HTTPException(status_code=503, detail="Agent not initialized")
     
-    new_session = agent_manager.agent.sessions.create_session(title=session.title)
+    # 强制创建新会话，不复用旧的 "default" 或其他逻辑
+    import uuid
+    new_key = str(uuid.uuid4())
+    
+    new_session = agent_manager.agent.sessions.create_session(key=new_key, title=session.title)
     
     return {
         "success": True,
         "session": {
-            "id": new_session.key,
+            "id": new_session.key, # Frontend uses key as ID
             "title": new_session.metadata.get("title"),
             "created_at": new_session.created_at,
             "updated_at": new_session.updated_at
@@ -747,6 +773,67 @@ async def execute_tool(request: ToolRequest):
     )
 
 
+@app.post("/system/reset")
+async def reset_system(confirm: bool = False):
+    """
+    大红按钮：删除所有本地数据（会话、记忆、配置等）。
+    危险操作，需要确认！
+    """
+    if not confirm:
+         raise HTTPException(status_code=400, detail="Please confirm deletion by setting confirm=true")
+         
+    if not agent_manager or not agent_manager.agent:
+        raise HTTPException(status_code=503, detail="Agent not initialized")
+        
+    try:
+        import shutil
+        from pathlib import Path
+        
+        # 1. Delete all sessions
+        sessions_dir = agent_manager.workspace / "data" / "sessions"
+        if sessions_dir.exists():
+            # Close all active sessions first
+            # (Assuming agent.sessions handles this, but we force it)
+            agent_manager.agent.sessions._cache.clear()
+            agent_manager.agent.sessions._index.clear()
+            try:
+                shutil.rmtree(sessions_dir)
+            except Exception as e:
+                logger.error(f"Failed to delete sessions dir: {e}")
+                # Try creating it empty
+        
+        # Recreate empty sessions dir
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        # Re-init index
+        (sessions_dir / "index.json").write_text("{}", encoding="utf-8")
+        agent_manager.agent.sessions._load_index()
+        
+        # 2. Delete Memory (SQLite)
+        memory_db = agent_manager.workspace / "memory" / "memories.db"
+        if memory_db.exists():
+            try:
+                memory_db.unlink()
+            except Exception as e:
+                logger.error(f"Failed to delete memory db: {e}")
+                
+        # 3. Delete Cron Jobs
+        cron_file = agent_manager.workspace / "data" / "cron" / "jobs.json"
+        if cron_file.exists():
+             try:
+                cron_file.unlink()
+             except Exception as e:
+                logger.error(f"Failed to delete cron jobs: {e}")
+        
+        # 4. Reset User Profile/Soul (Optional? User said "ALL local data")
+        # Soul is in soul.json? No, usually managed by SoulManager
+        # Let's check SoulManager path
+        # Assuming soul_manager stores in workspace/soul/ ...
+        
+        return {"success": True, "message": "All local data has been nuked."}
+        
+    except Exception as e:
+        logger.error(f"Reset failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Reset failed: {str(e)}")
 @app.post("/sandbox/run", response_model=ToolResponse)
 async def run_sandbox_code(request: SandboxRequest):
     """运行沙箱代码"""

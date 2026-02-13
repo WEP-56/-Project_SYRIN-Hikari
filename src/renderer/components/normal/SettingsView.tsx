@@ -78,6 +78,33 @@ export default function SettingsView() {
     }, 5000);
   };
 
+  const handleResetSystem = async () => {
+    if (!confirm('警告：此操作将删除所有本地数据（会话、记忆、配置等），且不可恢复！\n\n您确定要按下这个“大红按钮”吗？')) {
+        return;
+    }
+    
+    // Double confirm
+    if (!confirm('再次确认：这真的会清空一切。您确定吗？')) {
+        return;
+    }
+
+    setSaveStatus('saving'); // Re-use saving status for visual feedback
+    try {
+        const res = await api.resetSystem();
+        if (res.success) {
+            alert('系统已重置。应用将自动刷新。');
+            window.location.reload();
+        } else {
+            alert(`重置失败: ${res.error}`);
+            setSaveStatus('error');
+        }
+    } catch (e) {
+        alert(`重置出错: ${e}`);
+        setSaveStatus('error');
+    }
+    setTimeout(() => setSaveStatus('idle'), 3000);
+  };
+
   const menuItems: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
     { id: 'display', label: '显示', icon: <Monitor size={18} /> },
     { id: 'system', label: '系统', icon: <Cpu size={18} /> },
@@ -173,7 +200,7 @@ export default function SettingsView() {
             className="max-w-2xl mx-auto"
           >
             {activeTab === 'display' && <DisplaySettings />}
-            {activeTab === 'system' && <SystemSettings />}
+            {activeTab === 'system' && <SystemSettings onReset={handleResetSystem} />}
             {activeTab === 'auth' && <AuthSettings settings={localSettings} onChange={handleChange} />}
             {activeTab === 'assistant' && <AssistantSettings settings={localSettings} onChange={handleChange} />}
             {activeTab === 'model' && <ModelSettings settings={localSettings} onChange={handleChange} />}
@@ -293,7 +320,7 @@ function DisplaySettings() {
   );
 }
 
-function SystemSettings() {
+function SystemSettings({ onReset }: { onReset: () => void }) {
   return (
     <div className="space-y-6">
       <SectionHeader title="系统设置" description="管理存储和缓存" />
@@ -311,7 +338,7 @@ function SystemSettings() {
           <div className="p-3 bg-gray-50 rounded-lg border border-gray-100">
              <div className="text-xs text-gray-500 mb-1">记忆数据库</div>
              <div className="text-sm font-mono text-gray-700 break-all">
-               ./workspace/soul_db.json
+               ./workspace/memory/memories.db
              </div>
           </div>
           <div className="text-xs text-gray-400 px-1">
@@ -319,11 +346,17 @@ function SystemSettings() {
           </div>
         </div>
       </Card>
-      <Card title="维护">
-        <button className="flex items-center space-x-2 text-red-500 hover:bg-red-50 px-4 py-2 rounded-lg transition-colors text-sm">
-          <Trash2 size={16} />
-          <span>清除所有缓存数据</span>
-        </button>
+      <Card title="危险区域">
+        <div className="space-y-2">
+            <p className="text-xs text-red-500">警告：以下操作不可逆！</p>
+            <button 
+                onClick={onReset}
+                className="w-full flex items-center justify-center space-x-2 bg-red-50 text-red-600 hover:bg-red-600 hover:text-white px-4 py-3 rounded-lg transition-all border border-red-200 hover:border-red-600 hover:shadow-lg group"
+            >
+              <Trash2 size={18} className="group-hover:animate-bounce" />
+              <span className="font-bold">大红按钮 (核平所有数据)</span>
+            </button>
+        </div>
       </Card>
     </div>
   );
@@ -336,7 +369,7 @@ function AuthSettings({ settings, onChange }: any) {
       <Card>
         <Toggle
           label="自动执行命令"
-          description="允许 AI 无需确认即可执行系统命令（如打开应用、文件操作等）。关闭后，所有高风险命令（如打开应用、写文件、执行脚本）将被直接阻止，以确保安全。"
+          description="允许 AI 无需确认即可执行系统命令（如打开应用、文件操作等）。关闭后，所有高风险命令（如打开应用、写文件、执行脚本）需要您确认后才能执行。"
           checked={settings.autoExecute}
           onChange={(v) => onChange('autoExecute', v)}
         />

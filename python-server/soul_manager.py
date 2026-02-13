@@ -98,17 +98,15 @@ class SoulManager:
                         dependency=old_score * 0.5
                     )
                     user_profile = UserProfile(
-                        name=data.get("user_profile", {}).get("name", "User"),
-                        facts=data.get("user_profile", {}).get("facts", {})
+                        name="User",
+                        mbti=None
                     )
                     return SoulState(metrics=metrics, user_profile=user_profile)
-                    
             except Exception as e:
-                logger.error(f"Failed to load soul DB: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
+                logger.error(f"Failed to load soul state: {e}")
+                return SoulState()
         
-        # Default state
+        # 默认初始状态 (Stranger)
         return SoulState()
     
     def save(self):

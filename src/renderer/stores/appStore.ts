@@ -150,7 +150,10 @@ export const useAppStore = create<AppState>()(
         // Create session on backend
         const session = await api.createSession();
         if (session) {
+          // Immediately reload sessions to ensure consistency
+          const sessions = await api.getSessions();
           set({ 
+            sessions,
             currentSessionId: session.id,
             messages: [{
               id: 'welcome',
@@ -160,8 +163,6 @@ export const useAppStore = create<AppState>()(
               emotion: 'happy',
             }]
           });
-          // Refresh session list
-          await get().loadSessions();
         }
       },
       

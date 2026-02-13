@@ -15,7 +15,8 @@ export default function ChatView() {
     setIsTyping,
     setCurrentEmotion,
     settings,
-    currentSessionId 
+    currentSessionId,
+    sidebarOpen
   } = useAppStore();
   
   const [input, setInput] = useState('');
@@ -28,7 +29,7 @@ export default function ChatView() {
 
   useEffect(() => {
     inputRef.current?.focus();
-  }, []);
+  }, [sidebarOpen]);
 
   // 人格状态管理
   const [personaState, setPersonaState] = useState(defaultPersonaState);
@@ -54,9 +55,29 @@ export default function ChatView() {
       
       console.log('Generated persona prompt:', systemPrompt.substring(0, 200) + '...');
       
-      const response = await api.sendMessage(userMessage.content, currentSessionId || undefined, systemPrompt);
+      // Capture current session ID to prevent race conditions
+      // Use "default" if currentSessionId is null/empty, to trigger initial session creation logic on backend
+      const sendingSessionId = currentSessionId || "default";
+      
+      const response = await api.sendMessage(userMessage.content, sendingSessionId, systemPrompt);
+      
+      // If session changed while waiting for response, do not update UI with new message
+      // (The message is already saved in backend history for the original session)
+      if (useAppStore.getState().currentSessionId !== currentSessionId) {
+        console.log('Session changed, skipping UI update for previous session response');
+        setIsTyping(false);
+        return;
+      }
       
       if (response?.success) {
+        // Update session ID if it was a new session (e.g. sent with "default")
+        // The backend returns the actual persistent session_id
+        if (sendingSessionId === 'default' && response.session_id && response.session_id !== 'default') {
+             console.log(`Switching from default to new session: ${response.session_id}`);
+             // We need to update the store's current session ID to the real one
+             // This prevents the NEXT message from sending "default" again and creating another duplicate
+             useAppStore.getState().selectSession(response.session_id);
+        }
         // 更新情绪和好感度
         const newEmotion = settings.emotionEnabled 
           ? updateEmotionFromInteraction(personaState, userMessage.content, response.response)

@@ -349,8 +349,8 @@ def gateway(
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    # New CronService takes db and session_manager
+    cron = CronService(session_manager.db, session_manager)
     
     # Create agent with cron service
     agent = AgentLoop(
@@ -694,11 +694,13 @@ def cron_list(
     all: bool = typer.Option(False, "--all", "-a", help="Include disabled jobs"),
 ):
     """List scheduled jobs."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.loader import load_config
     from nanobot.cron.service import CronService
+    from nanobot.session.manager import SessionManager
     
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    config = load_config()
+    session_manager = SessionManager(config.workspace_path)
+    service = CronService(session_manager.db, session_manager)
     
     jobs = service.list_jobs(include_disabled=all)
     
@@ -748,9 +750,10 @@ def cron_add(
     channel: str = typer.Option(None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"),
 ):
     """Add a scheduled job."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.loader import load_config
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronSchedule
+    from nanobot.session.manager import SessionManager
     
     # Determine schedule type
     if every:
@@ -765,8 +768,14 @@ def cron_add(
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
         raise typer.Exit(1)
     
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    config = load_config()
+    session_manager = SessionManager(config.workspace_path)
+    service = CronService(session_manager.db, session_manager)
+    
+    # For CLI add, we default session_id to "cli:default" if not specified?
+    # Or we require it? The CLI usually runs in "cli:default" context.
+    # Let's assume cli:default key -> session_id lookup.
+    session = session_manager.get_or_create("cli:default")
     
     job = service.add_job(
         name=name,
@@ -775,6 +784,7 @@ def cron_add(
         deliver=deliver,
         to=to,
         channel=channel,
+        session_id=session.id, # Use default session ID
     )
     
     console.print(f"[green]✓[/green] Added job '{job.name}' ({job.id})")
@@ -785,11 +795,13 @@ def cron_remove(
     job_id: str = typer.Argument(..., help="Job ID to remove"),
 ):
     """Remove a scheduled job."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.loader import load_config
     from nanobot.cron.service import CronService
+    from nanobot.session.manager import SessionManager
     
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    config = load_config()
+    session_manager = SessionManager(config.workspace_path)
+    service = CronService(session_manager.db, session_manager)
     
     if service.remove_job(job_id):
         console.print(f"[green]✓[/green] Removed job {job_id}")
@@ -803,11 +815,13 @@ def cron_enable(
     disable: bool = typer.Option(False, "--disable", help="Disable instead of enable"),
 ):
     """Enable or disable a job."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.loader import load_config
     from nanobot.cron.service import CronService
+    from nanobot.session.manager import SessionManager
     
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    config = load_config()
+    session_manager = SessionManager(config.workspace_path)
+    service = CronService(session_manager.db, session_manager)
     
     job = service.enable_job(job_id, enabled=not disable)
     if job:
@@ -823,11 +837,13 @@ def cron_run(
     force: bool = typer.Option(False, "--force", "-f", help="Run even if disabled"),
 ):
     """Manually run a job."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.loader import load_config
     from nanobot.cron.service import CronService
+    from nanobot.session.manager import SessionManager
     
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    config = load_config()
+    session_manager = SessionManager(config.workspace_path)
+    service = CronService(session_manager.db, session_manager)
     
     async def run():
         return await service.run_job(job_id, force=force)

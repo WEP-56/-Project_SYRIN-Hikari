@@ -1,90 +1,174 @@
-"""Session management for conversation history."""
+"""Session management using SQLite for metadata and directory-based storage for messages."""
 
 import json
+import uuid
+import shutil
+import time
 from pathlib import Path
-from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 from datetime import datetime
-from typing import Any
 
 from loguru import logger
 
-from nanobot.utils.helpers import ensure_dir, safe_filename
+from nanobot.utils.helpers import ensure_dir
+from nanobot.session.models import Message, SessionMetadata
+from nanobot.session.storage import SessionStorage
+from nanobot.storage.db import Database
+from nanobot.storage.models import SessionModel
 
-
-@dataclass
 class Session:
     """
-    A conversation session.
-    
-    Stores messages in JSONL format for easy reading and persistence.
+    A conversation session proxy.
+    Wraps SessionStorage (messages) and SessionModel (metadata).
     """
+
+    def __init__(self, storage: SessionStorage, model: SessionModel, db: Database):
+        self._storage = storage
+        self._model = model
+        self._db = db
+        self.is_processing = False  # Busy Guard flag
+
+    def close(self) -> None:
+        """Close the underlying storage connection."""
+        self._storage.close()
+
+    @property
+    def id(self) -> str:
+        return self._model.id
+
+    @property
+    def key(self) -> str:
+        return self._model.key
+
+    @property
+    def created_at(self) -> datetime:
+        return datetime.fromtimestamp(self._model.created_at / 1000)
+
+    @property
+    def updated_at(self) -> datetime:
+        return datetime.fromtimestamp(self._model.updated_at / 1000)
     
-    key: str  # channel:chat_id
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    @updated_at.setter
+    def updated_at(self, value: datetime):
+        self._model.updated_at = int(value.timestamp() * 1000)
+        self._db.update_session(self._model)
+
+    @property
+    def title(self) -> str:
+        return self._model.title
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """
+        Return metadata dict for compatibility.
+        Includes core fields (id, key, title) and extra metadata.
+        """
+        base = {
+            "id": self._model.id,
+            "key": self._model.key,
+            "title": self._model.title,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+        base.update(self._model.metadata)
+        return base
     
+    @property
+    def messages(self) -> List[Dict[str, Any]]:
+        """
+        Legacy property for accessing messages. 
+        Returns dict representation of all messages.
+        Use get_history() for LLM context.
+        """
+        msgs = self._storage.get_messages(limit=10000)
+        return [self._msg_to_dict(m) for m in msgs]
+    
+    @messages.setter
+    def messages(self, value: List[Dict[str, Any]]):
+        """
+        Legacy setter for messages.
+        WARNING: This replaces ALL messages in the DB.
+        """
+        new_msgs = []
+        for m in value:
+            new_msgs.append(Message(
+                role=m.get("role", "unknown"),
+                content=m.get("content", ""),
+                timestamp=datetime.fromisoformat(m["timestamp"]) if "timestamp" in m else datetime.now(),
+                tool_calls=m.get("tool_calls"),
+                tool_call_id=m.get("tool_call_id"),
+                name=m.get("name"),
+                type=m.get("type", "text")
+            ))
+        self._storage.replace_messages(new_msgs)
+
+    def _msg_to_dict(self, m: Message) -> Dict[str, Any]:
+        d = {
+            "role": m.role,
+            "content": m.content,
+            "timestamp": m.timestamp.isoformat()
+        }
+        if m.tool_calls:
+            d["tool_calls"] = m.tool_calls
+        if m.tool_call_id:
+            d["tool_call_id"] = m.tool_call_id
+        if m.name:
+            d["name"] = m.name
+        if m.type != "text":
+            d["type"] = m.type
+        return d
+
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
-        msg = {
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat(),
+        msg = Message(
+            role=role,
+            content=content,
+            timestamp=datetime.now(),
             **kwargs
-        }
-        self.messages.append(msg)
+        )
+        self._storage.add_message(msg)
+        
+        # Update timestamp
         self.updated_at = datetime.now()
         
-        # Auto-set title if it's the first user message and title is default/empty/new
+        # Auto-set title if it's the first user message and title is default
         if role == "user":
-            current_title = self.metadata.get("title", "")
-            if not current_title or current_title == self.key or current_title == "新对话":
+            current_title = self._model.title
+            if not current_title or current_title == "New Chat" or current_title == "新对话":
                 # Use first 30 chars of content as title
                 title = content.strip().split('\n')[0][:30]
                 if len(content) > 30:
                     title += "..."
-                self.metadata["title"] = title
+                self._model.title = title
+                self._db.update_session(self._model)
 
-    def get_history(self, max_messages: int = 50) -> list[dict[str, Any]]:
+    def get_history(self, max_messages: int = 50) -> List[Dict[str, Any]]:
         """
         Get message history for LLM context.
-        
-        Args:
-            max_messages: Maximum messages to return.
-        
-        Returns:
-            List of messages in LLM format.
         """
-        # Get recent messages
-        recent = self.messages[-max_messages:] if len(self.messages) > max_messages else self.messages
+        # Get sufficient messages from DB
+        msgs = self._storage.get_messages(limit=max_messages * 2)
         
-        # Convert to LLM format (just role and content)
-        return [{"role": m["role"], "content": m["content"]} for m in recent]
-    
-    def clear(self) -> None:
-        """Clear all messages in the session."""
-        self.messages = []
-        self.updated_at = datetime.now()
+        # Return last N messages converted to dicts
+        recent = msgs[-max_messages:] if len(msgs) > max_messages else msgs
+        return [self._msg_to_dict(m) for m in recent]
 
     async def compact(self, provider: Any, model: str | None = None, threshold: int = 50, keep: int = 20) -> bool:
         """
         Compact the session history if it exceeds threshold.
-        Summarizes older messages and keeps the most recent ones.
         """
-        if len(self.messages) <= threshold:
+        all_msgs = self._storage.get_messages(limit=10000)
+        if len(all_msgs) <= threshold:
             return False
             
         # Select messages to summarize
-        to_summarize = self.messages[:-keep]
-        recent = self.messages[-keep:]
+        to_summarize = all_msgs[:-keep]
+        recent = all_msgs[-keep:]
         
         # Build prompt
         text_to_summarize = ""
         for msg in to_summarize:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            text_to_summarize += f"{role}: {content}\n\n"
+            text_to_summarize += f"{msg.role}: {msg.content}\n\n"
             
         prompt = f"""Please summarize the following conversation history into a concise paragraph. 
 Focus on key facts, user preferences, and important decisions. 
@@ -100,15 +184,16 @@ Summary:"""
             summary = await provider.generate(prompt, system="You are a helpful assistant summarizing a conversation.", model=model)
             
             # Create summary message
-            summary_msg = {
-                "role": "system",
-                "content": f"Previous conversation summary: {summary}",
-                "timestamp": datetime.now().isoformat(),
-                "type": "summary"
-            }
+            summary_msg = Message(
+                role="system",
+                content=f"Previous conversation summary: {summary}",
+                timestamp=datetime.now(),
+                type="summary"
+            )
             
-            # Replace messages
-            self.messages = [summary_msg] + recent
+            # Replace messages in DB
+            self._storage.replace_messages([summary_msg] + recent)
+            
             self.updated_at = datetime.now()
             logger.info(f"Session {self.key} compacted. {len(to_summarize)} messages summarized.")
             return True
@@ -120,178 +205,185 @@ Summary:"""
 
 class SessionManager:
     """
-    Manages conversation sessions.
-    
-    Sessions are stored as JSONL files in the sessions directory.
+    Manages conversation sessions using SQLite (metadata) and SessionStorage (messages).
     """
     
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.sessions_dir = ensure_dir(Path.home() / ".nanobot" / "sessions")
-        self._cache: dict[str, Session] = {}
-    
-    def _get_session_path(self, key: str) -> Path:
-        """Get the file path for a session."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.sessions_dir / f"{safe_key}.jsonl"
-    
+        self.sessions_root = ensure_dir(workspace / "data" / "sessions")
+        self.db_path = workspace / "data" / "global.db"
+        self.db = Database(self.db_path)
+        self._cache: Dict[str, Session] = {}
+
+    def get_by_id(self, session_id: str) -> Optional[Session]:
+        """Get session by UUID."""
+        # 1. Check cache (by scanning values, expensive but okay for small N)
+        for s in self._cache.values():
+            if s.id == session_id:
+                return s
+                
+        # 2. Check DB
+        # We need a method in DB to get by ID, but currently we only have get_session(key).
+        # Let's list all or add a method. For now, let's iterate.
+        # Ideally we should add get_session_by_id to Database.
+        # But wait, our get_session uses KEY. 
+        # Let's rely on listing for now or add the method.
+        # Actually, let's use list_sessions and filter.
+        all_sessions = self.db.list_sessions()
+        model = next((s for s in all_sessions if s.id == session_id), None)
+        
+        if model:
+            return self._load_session(model)
+        return None
+
     def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.
         
         Args:
             key: Session key (usually channel:chat_id).
-        
-        Returns:
-            The session.
         """
-        # Check cache
+        # 1. Check memory cache
         if key in self._cache:
             return self._cache[key]
-        
-        # Try to load from disk
-        session = self._load(key)
-        if session is None:
-            session = Session(key=key)
-        
-        self._cache[key] = session
-        return session
-    
-    async def compact_session(self, session: Session, provider: Any, model: str | None = None) -> bool:
-        """Compact a session and save it."""
-        if await session.compact(provider, model):
-            self.save(session)
-            return True
-        return False
-    
-    def _load(self, key: str) -> Session | None:
-        """Load a session from disk."""
-        path = self._get_session_path(key)
-        
-        if not path.exists():
-            return None
-        
-        try:
-            messages = []
-            metadata = {}
-            created_at = None
-            
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    data = json.loads(line)
-                    
-                    # Handle metadata (with backward compatibility)
-                    if data.get("_type") == "metadata" or ("key" in data and "metadata" in data and "role" not in data):
-                        metadata = data.get("metadata", {})
-                        if data.get("created_at"):
-                            try:
-                                created_at = datetime.fromisoformat(data["created_at"])
-                            except ValueError:
-                                created_at = None
-                    # Only add valid messages with a role
-                    elif "role" in data:
-                        messages.append(data)
-            
-            return Session(
-                key=key,
-                messages=messages,
-                created_at=created_at or datetime.now(),
-                metadata=metadata
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load session {key}: {e}")
-            return None
-    
-    def save(self, session: Session) -> None:
-        """Save a session to disk."""
-        path = self._get_session_path(session.key)
-        
-        with open(path, "w", encoding="utf-8") as f:
-            # Write metadata
-            meta = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata
-            }
-            f.write(json.dumps(meta) + "\n")
-            
-            # Write messages
-            for msg in session.messages:
-                f.write(json.dumps(msg) + "\n")
-    
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """List all available sessions sorted by update time (newest first)."""
-        sessions = []
-        for path in self.sessions_dir.glob("*.jsonl"):
-            try:
-                # Read first line for metadata
-                with open(path, "r", encoding="utf-8") as f:
-                    first_line = f.readline()
-                    if not first_line:
-                        continue
-                    meta = json.loads(first_line)
-                    
-                    # Read last line for preview if messages exist
-                    preview = ""
-                    last_line = ""
-                    for line in f:
-                        if line.strip():
-                            last_line = line
-                    
-                    if last_line:
-                        last_msg = json.loads(last_line)
-                        preview = last_msg.get("content", "")[:50]
-                    
-                    sessions.append({
-                        "id": meta.get("key"),
-                        "updated_at": meta.get("updated_at"),
-                        "created_at": meta.get("created_at"),
-                        "title": meta.get("metadata", {}).get("title", meta.get("key")),
-                        "preview": preview
-                    })
-            except Exception as e:
-                logger.error(f"Error reading session {path}: {e}")
-        
-        # Sort by updated_at descending
-        return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
 
-    def delete_session(self, key: str) -> bool:
-        """Delete a session."""
-        if key in self._cache:
-            del self._cache[key]
-            
-        path = self._get_session_path(key)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+        # 2. Check DB
+        model = self.db.get_session(key)
         
+        if model:
+            # Load existing
+            session = self._load_session(model)
+            if session:
+                self._cache[key] = session
+                return session
+            else:
+                # Session data corrupt/missing
+                self.db.delete_session(key)
+
+        # 3. Create new
+        return self.create_session(key)
+
+    def _load_session(self, model: SessionModel) -> Optional[Session]:
+        """Load session from storage."""
+        storage = SessionStorage(model.id, self.sessions_root)
+        try:
+            storage.initialize()
+            return Session(storage, model, self.db)
+        except Exception as e:
+            logger.error(f"Failed to load session {model.id}: {e}")
+            return None
+
     def create_session(self, key: str | None = None, title: str | None = None) -> Session:
         """Create a new session."""
         if not key:
-            import uuid
             key = str(uuid.uuid4())
             
-        session = Session(key=key)
-        session.metadata["title"] = title or "新对话"
-        session.updated_at = datetime.now()
+        # Enforce Isolation: If session exists for this key, delete it first.
+        existing = self.db.get_session(key)
+        if existing:
+            logger.info(f"Session collision for {key}. Deleting old session {existing.id}...")
+            self.delete_session(key)
+            
+        # Generate new session ID
+        session_id = str(uuid.uuid4())
+        now_ms = int(time.time() * 1000)
         
+        # Create storage (fs + messages.db)
+        storage = SessionStorage(session_id, self.sessions_root)
+        storage.initialize()
+        
+        # Create metadata model
+        model = SessionModel(
+            id=session_id,
+            key=key,
+            title=title or "New Chat",
+            created_at=now_ms,
+            updated_at=now_ms,
+            meta_json="{}"
+        )
+        
+        # Save to DB
+        self.db.create_session(model)
+        
+        # Create session object
+        session = Session(storage, model, self.db)
         self._cache[key] = session
-        self.save(session)
-        return session
         
+        logger.info(f"Created new session {session_id} for key {key}")
+        return session
+
+    def delete_session(self, key: str) -> bool:
+        """Delete a session completely."""
+        # 1. Remove from memory cache
+        if key in self._cache:
+            self._cache[key].close()
+            del self._cache[key]
+            
+        # 2. Get info from DB
+        model = self.db.get_session(key)
+        if not model:
+            return False
+            
+        # 3. Delete storage (files)
+        storage = SessionStorage(model.id, self.sessions_root)
+        storage.delete()
+        
+        # 4. Delete from DB
+        self.db.delete_session(key)
+        
+        logger.info(f"Deleted session {key} ({model.id})")
+        return True
+
+    def list_sessions(self) -> List[Dict[str, Any]]:
+        """List all available sessions."""
+        models = self.db.list_sessions()
+        sessions = []
+        
+        for model in models:
+            # We peek into storage for preview without fully loading Session object
+            # to avoid opening too many DB connections.
+            storage = SessionStorage(model.id, self.sessions_root)
+            preview = ""
+            try:
+                msgs = storage.get_messages(limit=1) # Get last one? No, get_messages sorts by ID ASC.
+                # To get last message efficiently we might need descending sort in storage, 
+                # but currently get_messages gets first N.
+                # Let's just get all (limit 1000) and take last.
+                # Optimization: Add get_last_message to SessionStorage.
+                msgs = storage.get_messages(limit=1000)
+                if msgs:
+                    preview = msgs[-1].content[:50]
+            except Exception:
+                pass
+            finally:
+                storage.close()
+
+            sessions.append({
+                "id": model.key, # Use key as ID for frontend compatibility
+                "session_id": model.id, # Internal ID
+                "updated_at": datetime.fromtimestamp(model.updated_at / 1000).isoformat(),
+                "created_at": datetime.fromtimestamp(model.created_at / 1000).isoformat(),
+                "title": model.title,
+                "preview": preview
+            })
+            
+        return sessions
+
+    async def compact_session(self, session: Session, provider: Any, model: str | None = None) -> bool:
+        """Compact a session and save it."""
+        return await session.compact(provider, model)
+
+    def save(self, session: Session) -> None:
+        """
+        Save session. No-op in new architecture as changes are persisted immediately.
+        """
+        pass
+
     def update_session(self, key: str, title: str | None = None) -> bool:
         """Update session metadata."""
         session = self.get_or_create(key)
         if title:
-            session.metadata["title"] = title
-            session.updated_at = datetime.now()
-            self.save(session)
+            session._model.title = title
+            session.updated_at = datetime.now() # Trigger save
             return True
         return False

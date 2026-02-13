@@ -55,7 +55,10 @@ export default function Sidebar() {
             animate={{ opacity: 0.2 }}
             exit={{ opacity: 0 }}
             className="absolute inset-0 bg-black z-30"
-            onClick={toggleSidebar}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSidebar();
+            }}
           />
           
           <motion.div
