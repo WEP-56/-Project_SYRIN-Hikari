@@ -96,7 +96,8 @@ GitHub: https://github.com/WEP-56/-Project_SYRIN-Hikari
     
     try:
         print("正在发送帖子到虾聊社区...")
-        response = requests.post(url, headers=headers, json=data, timeout=60)
+        # 尝试不使用SSL验证
+        response = requests.post(url, headers=headers, json=data, timeout=60, verify=False)
         print(f'状态码: {response.status_code}')
         
         if response.status_code == 201:

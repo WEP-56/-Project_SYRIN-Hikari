@@ -28,6 +28,8 @@ test_workspace
 python-server/workspace/data/sessions
 REFACTOR_PLAN.md
 python-server/workspace/data
+python-server/workspace/CLAWDCHAT_USAGE.md
+功能自查.md
 
 # Logs
 *.log
