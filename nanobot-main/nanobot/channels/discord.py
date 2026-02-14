@@ -61,11 +61,8 @@ class DiscordChannel(BaseChannel):
             elif "proxies" in params:
                 client_kwargs["proxies"] = self._proxy_url
             else:
-                if not os.environ.get("HTTPS_PROXY"):
-                    os.environ["HTTPS_PROXY"] = self._proxy_url
-                if not os.environ.get("HTTP_PROXY"):
-                    os.environ["HTTP_PROXY"] = self._proxy_url
-                client_kwargs["trust_env"] = True
+                logger.warning("httpx client proxy not supported in this version; REST calls will be direct")
+                client_kwargs["trust_env"] = False
 
         self._http = httpx.AsyncClient(**client_kwargs)
         await self._preflight_check()
