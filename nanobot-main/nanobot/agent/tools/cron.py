@@ -74,14 +74,14 @@ class CronTool(Tool):
         **kwargs: Any
     ) -> str:
         if action == "add":
-            return self._add_job(message, every_seconds, cron_expr)
+            return self._add_job(message, every_seconds, cron_expr, **kwargs)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
             return self._remove_job(job_id)
         return f"Unknown action: {action}"
     
-    def _add_job(self, message: str, every_seconds: int | None, cron_expr: str | None) -> str:
+    def _add_job(self, message: str, every_seconds: int | None, cron_expr: str | None, **kwargs: Any) -> str:
         if not message:
             return "Error: message is required for add"
         if not self._channel or not self._chat_id:

@@ -8,7 +8,15 @@ function App() {
   const { setConnectionStatus, updateSettings, addMessage } = useAppStore();
 
   useEffect(() => {
-    // 检查后端连接
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleNext = (delay: number) => {
+      if (cancelled) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(checkConnection, delay);
+    };
+
     const checkConnection = async () => {
       try {
         const status = await api.getStatus();
@@ -23,19 +31,22 @@ function App() {
               model: config.model || 'gpt-4o-mini',
             });
           }
+          scheduleNext(300000);
         } else {
           setConnectionStatus('error');
+          scheduleNext(5000);
         }
       } catch {
         setConnectionStatus('error');
+        scheduleNext(5000);
       }
     };
 
     checkConnection();
-    // 延长轮询间隔至5分钟，减少日志噪音和窗口波动
-    const interval = setInterval(checkConnection, 300000);
-
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   // Poll for notifications (Proactive Mode)

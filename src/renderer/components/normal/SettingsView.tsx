@@ -11,7 +11,7 @@ import { api } from '../../services/api';
 type SettingsTab = 'display' | 'system' | 'auth' | 'assistant' | 'model' | 'external' | 'about';
 
 export default function SettingsView() {
-  const { settings, updateSettings, connectionStatus } = useAppStore();
+  const { settings, updateSettings, connectionStatus, resetAll } = useAppStore();
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const [localSettings, setLocalSettings] = useState(settings);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -41,6 +41,10 @@ export default function SettingsView() {
       search_provider: localSettings.search_provider,
       telegram_token: localSettings.telegramToken,
       telegram_enabled: localSettings.telegramEnabled,
+      discord_token: localSettings.discordToken,
+      discord_enabled: localSettings.discordEnabled,
+      discord_allow_from: localSettings.discordAllowFrom,
+      discord_proxy: localSettings.discordProxy,
       user_name: localSettings.user_name,
       role_name: localSettings.role_name,
       emotionEnabled: localSettings.emotionEnabled,
@@ -90,14 +94,11 @@ export default function SettingsView() {
 
     setSaveStatus('saving'); // Re-use saving status for visual feedback
     try {
-        const res = await api.resetSystem();
-        if (res.success) {
-            alert('系统已重置。应用将自动刷新。');
-            window.location.reload();
-        } else {
-            alert(`重置失败: ${res.error}`);
-            setSaveStatus('error');
-        }
+        // Use store action to reset everything (backend + frontend state)
+        await resetAll();
+        
+        alert('系统已重置。应用将自动刷新。');
+        window.location.reload();
     } catch (e) {
         alert(`重置出错: ${e}`);
         setSaveStatus('error');
@@ -199,7 +200,7 @@ export default function SettingsView() {
             transition={{ duration: 0.2 }}
             className="max-w-2xl mx-auto"
           >
-            {activeTab === 'display' && <DisplaySettings />}
+            {activeTab === 'display' && <DisplaySettings settings={localSettings} onChange={handleChange} />}
             {activeTab === 'system' && <SystemSettings onReset={handleResetSystem} />}
             {activeTab === 'auth' && <AuthSettings settings={localSettings} onChange={handleChange} />}
             {activeTab === 'assistant' && <AssistantSettings settings={localSettings} onChange={handleChange} />}
@@ -305,15 +306,38 @@ function Select({ label, value, onChange, options }: any) {
 
 // --- Section Components ---
 
-function DisplaySettings() {
+function DisplaySettings({ settings, onChange }: { settings: any; onChange: (key: string, value: any) => void }) {
+  const options = [
+    { value: 'light', label: '浅色模式', desc: '清爽明亮的默认风格' },
+    { value: 'dark', label: '深色模式', desc: '更护眼的暗色界面' },
+    { value: 'love', label: '恋爱模式', desc: '粉白色系与爱心风格' },
+  ];
+
   return (
     <div className="space-y-6">
       <SectionHeader title="显示设置" description="自定义界面的外观和感觉" />
       <Card>
-        <div className="text-center py-8 text-gray-500">
-          <Monitor size={48} className="mx-auto mb-4 opacity-20" />
-          <p>当前使用系统默认主题</p>
-          <p className="text-xs mt-2">更多个性化选项即将推出...</p>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {options.map((opt) => {
+            const active = settings.themeMode === opt.value;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => onChange('themeMode', opt.value)}
+                className={`rounded-2xl border px-4 py-5 text-left transition-all ${
+                  active
+                    ? 'border-pink-400 bg-pink-50 shadow-sm'
+                    : 'border-gray-200 bg-white/70 hover:border-pink-300 hover:bg-white'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-gray-800">{opt.label}</div>
+                  {active && <Check size={16} className="text-pink-500" />}
+                </div>
+                <div className="text-xs text-gray-500 mt-2 leading-relaxed">{opt.desc}</div>
+              </button>
+            );
+          })}
         </div>
       </Card>
     </div>
@@ -499,6 +523,16 @@ function ModelSettings({ settings, onChange }: any) {
 }
 
 function ExternalSettings({ settings, onChange, testStatus, testMsg, onTest }: any) {
+  const discordAllowFromValue = Array.isArray(settings.discordAllowFrom)
+    ? settings.discordAllowFrom.join(', ')
+    : '';
+
+  const parseAllowFrom = (value: string) =>
+    value
+      .split(/[,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
   return (
     <div className="space-y-6">
       <SectionHeader title="外部应用" description="集成第三方服务和工具" />
@@ -542,6 +576,47 @@ function ExternalSettings({ settings, onChange, testStatus, testMsg, onTest }: a
                   </span>
                 )}
               </div>
+            </motion.div>
+          )}
+        </div>
+      </Card>
+
+      <Card title="Discord 集成">
+        <div className="space-y-4">
+          <Toggle
+            label="启用 Discord 机器人"
+            description="允许通过 Discord 与助手进行对话。"
+            checked={settings.discordEnabled}
+            onChange={(v) => onChange('discordEnabled', v)}
+          />
+
+          {settings.discordEnabled && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              className="space-y-4 pt-2"
+            >
+              <Input
+                label="Bot Token"
+                type="password"
+                value={settings.discordToken}
+                onChange={(v: string) => onChange('discordToken', v)}
+                placeholder="Bot Token"
+              />
+
+              <Input
+                label="允许用户 ID (可选)"
+                value={discordAllowFromValue}
+                onChange={(v: string) => onChange('discordAllowFrom', parseAllowFrom(v))}
+                placeholder="例如: 1234567890, 9876543210"
+              />
+
+              <Input
+                label="代理地址 (可选)"
+                value={settings.discordProxy}
+                onChange={(v: string) => onChange('discordProxy', v)}
+                placeholder="例如: http://127.0.0.1:7890"
+              />
             </motion.div>
           )}
         </div>

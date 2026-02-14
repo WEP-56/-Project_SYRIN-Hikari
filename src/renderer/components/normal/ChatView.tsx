@@ -16,7 +16,11 @@ export default function ChatView() {
     setCurrentEmotion,
     settings,
     currentSessionId,
-    sidebarOpen
+    sidebarOpen,
+    sessions,
+    updateSession,
+    soulState,
+    loadSoulState
   } = useAppStore();
   
   const [input, setInput] = useState('');
@@ -30,9 +34,29 @@ export default function ChatView() {
   useEffect(() => {
     inputRef.current?.focus();
   }, [sidebarOpen]);
+  
+  // Ensure sessions are loaded and validated on mount
+  useEffect(() => {
+    useAppStore.getState().loadSessions();
+    useAppStore.getState().loadSoulState();
+  }, []);
 
   // 人格状态管理
   const [personaState, setPersonaState] = useState(defaultPersonaState);
+
+  // Sync personaState from global soulState
+  useEffect(() => {
+    if (soulState) {
+        setPersonaState(prev => ({
+            ...prev,
+            affection: soulState.metrics?.affection ?? 50,
+            trust: soulState.metrics?.trust ?? 50,
+            // If backend provides emotion, it's already in store.currentEmotion
+            // But if we use personaState for other things, we might want to sync it too
+             emotion: (soulState.emotion?.primary?.toLowerCase() as any) || prev.emotion
+        }));
+    }
+  }, [soulState]);
 
   const handleSend = async () => {
     if (!input.trim() || isTyping) return;
@@ -49,17 +73,13 @@ export default function ChatView() {
     setIsTyping(true);
 
     try {
-      // 生成病娇人设 Prompt
-      const recentMessages = messages.slice(-5).map(m => `${m.role}: ${m.content}`);
-      const systemPrompt = generatePersonaPrompt(personaState, recentMessages);
-      
-      console.log('Generated persona prompt:', systemPrompt.substring(0, 200) + '...');
-      
       // Capture current session ID to prevent race conditions
       // Use "default" if currentSessionId is null/empty, to trigger initial session creation logic on backend
       const sendingSessionId = currentSessionId || "default";
       
-      const response = await api.sendMessage(userMessage.content, sendingSessionId, systemPrompt);
+      // We no longer generate systemPrompt on frontend to avoid state drift.
+      // The backend SoulManager maintains the true state and generates the dynamic prompt.
+      const response = await api.sendMessage(userMessage.content, sendingSessionId);
       
       // If session changed while waiting for response, do not update UI with new message
       // (The message is already saved in backend history for the original session)
@@ -78,28 +98,39 @@ export default function ChatView() {
              // This prevents the NEXT message from sending "default" again and creating another duplicate
              useAppStore.getState().selectSession(response.session_id);
         }
-        // 更新情绪和好感度
-        const newEmotion = settings.emotionEnabled 
-          ? updateEmotionFromInteraction(personaState, userMessage.content, response.response)
-          : 'normal';
-        const newAffection = updateAffection(personaState.affection, userMessage.content);
+
+        // Auto-rename logic: Check if current session title is generic and rename it
+        const targetSessionId = response.session_id || sendingSessionId;
+        const currentSession = sessions.find(s => s.id === targetSessionId);
         
-        setPersonaState(prev => ({
-          ...prev,
-          emotion: newEmotion,
-          affection: newAffection,
-          lastInteraction: Date.now(),
-        }));
+        // We use the store's latest sessions to check title, as it might have been loaded
+        const latestSessions = useAppStore.getState().sessions;
+        const latestSession = latestSessions.find(s => s.id === targetSessionId);
         
-        setCurrentEmotion(newEmotion);
+        if (latestSession && (!latestSession.title || latestSession.title === 'New Chat' || latestSession.title === '新对话')) {
+             if (userMessage.content.trim().length > 0) {
+                 const newTitle = userMessage.content.trim().substring(0, 30);
+                 // Call updateSession (which updates backend and reloads sessions)
+                 useAppStore.getState().updateSession(targetSessionId, newTitle);
+             }
+        }
+
+        // Reload soul state from backend (which has been updated by the chat request)
+        await loadSoulState();
+        
+        // Note: loadSoulState already updates store.currentEmotion and our useEffect updates personaState
+
+        // Update UI with response
+        // We use the store's currentEmotion which was updated by loadSoulState
+        const updatedEmotion = useAppStore.getState().currentEmotion;
         
         addMessage({
           id: (Date.now() + 1).toString(),
           role: 'assistant',
           content: response.response,
           timestamp: Date.now(),
-          emotion: newEmotion,
-        });
+          emotion: updatedEmotion,
+          });
       } else {
         setCurrentEmotion('sad');
         addMessage({
@@ -132,13 +163,54 @@ export default function ChatView() {
     }
   };
 
+  // 如果没有选中会话，显示空状态
+  const themeMode = settings?.themeMode || 'light';
+  const sakura = [
+    { left: '6%', top: '18%', size: 16, opacity: 0.25, delay: 0 },
+    { left: '18%', top: '64%', size: 12, opacity: 0.18, delay: 0.8 },
+    { left: '36%', top: '30%', size: 20, opacity: 0.22, delay: 1.2 },
+    { left: '52%', top: '52%', size: 14, opacity: 0.2, delay: 0.4 },
+    { left: '70%', top: '22%', size: 18, opacity: 0.24, delay: 1.6 },
+    { left: '82%', top: '70%', size: 12, opacity: 0.18, delay: 0.6 },
+    { left: '90%', top: '38%', size: 16, opacity: 0.2, delay: 1.1 },
+  ];
+
+  if (!currentSessionId) {
+    return (
+      <div className="chat-shell flex flex-col h-full items-center justify-center space-y-4">
+        <div className="chat-empty-icon w-24 h-24 rounded-full flex items-center justify-center text-5xl shadow-sm animate-pulse">
+          💕
+        </div>
+        <p className="chat-empty-text text-lg font-medium">快去创建一个新会话与光聊聊吧！</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-col h-full bg-[#f5f5f5]">
+    <div className={`chat-shell theme-${themeMode} flex flex-col h-full`}>
+      {themeMode === 'love' && (
+        <div className="chat-sakura">
+          {sakura.map((s, i) => (
+            <span
+              key={i}
+              className="sakura-petal"
+              style={{
+                left: s.left,
+                top: s.top,
+                width: `${s.size}px`,
+                height: `${s.size}px`,
+                opacity: s.opacity,
+                animationDelay: `${s.delay}s`,
+              }}
+            />
+          ))}
+        </div>
+      )}
       {/* 消息列表 */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
+      <div className="chat-list flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
         {messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-gray-400 space-y-4">
-            <div className="w-20 h-20 rounded-full bg-gray-200 flex items-center justify-center text-4xl animate-pulse">
+            <div className="chat-empty-icon w-20 h-20 rounded-full flex items-center justify-center text-4xl animate-pulse">
               💕
             </div>
             <p className="text-lg">开始和 Hikari 对话吧～</p>
@@ -157,7 +229,7 @@ export default function ChatView() {
       </div>
 
       {/* 输入区域 - 微信风格 */}
-      <div className="border-t border-[#e5e5e5] p-3 bg-[#f5f5f5]">
+      <div className="chat-input-bar border-t p-3">
         <div className="flex items-end space-x-2">
           <button
             onClick={clearMessages}
@@ -174,7 +246,7 @@ export default function ChatView() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder=""
-              className="w-full bg-white border border-[#e5e5e5] rounded-md px-3 py-2 text-sm resize-none focus:outline-none focus:border-green-500 focus:ring-1 focus:ring-green-500/50 transition-all text-gray-800"
+              className="chat-input w-full rounded-md px-3 py-2 text-sm resize-none focus:outline-none transition-all"
               rows={1}
               style={{ minHeight: '36px', maxHeight: '100px' }}
             />
@@ -217,33 +289,21 @@ function MessageItem({ message, index }: { message: import('../../stores/appStor
         {/* 头像 */}
         {!isUser ? (
           <div 
-            className="w-9 h-9 rounded-md flex items-center justify-center text-xl flex-shrink-0 bg-white border border-gray-200 mr-2"
+            className="chat-avatar w-9 h-9 rounded-md flex items-center justify-center text-xl flex-shrink-0 mr-2"
           >
             {emoji}
           </div>
         ) : (
-          <div className="w-9 h-9 rounded-md bg-gray-200 flex items-center justify-center ml-2">
-            <span className="text-gray-500 text-xs">Me</span>
+          <div className="chat-avatar-me w-9 h-9 rounded-md flex items-center justify-center ml-2">
+            <span className="text-xs">Me</span>
           </div>
         )}
 
         {/* 气泡 */}
         <div className="flex flex-col min-w-0">
-          <div
-            className={`relative px-3 py-2 rounded-md text-sm leading-relaxed shadow-sm break-words ${
-              isUser 
-                ? 'bg-[#95ec69] text-black' 
-                : 'bg-white text-gray-800 border border-gray-100'
-            }`}
-          >
+          <div className={`chat-bubble relative px-3 py-2 rounded-md text-sm leading-relaxed shadow-sm break-words ${isUser ? 'chat-bubble-user' : 'chat-bubble-assistant'}`}>
             {/* 气泡小三角 */}
-            <div 
-              className={`absolute top-3 w-0 h-0 border-solid border-4 ${
-                isUser
-                  ? 'right-[-8px] border-transparent border-l-[#95ec69]'
-                  : 'left-[-8px] border-transparent border-r-white'
-              }`}
-            />
+            <div className={`chat-bubble-tail absolute top-3 w-0 h-0 border-solid border-4 ${isUser ? 'chat-bubble-tail-user' : 'chat-bubble-tail-assistant'}`} />
             
             <div className="prose prose-sm max-w-none prose-p:my-0 prose-pre:my-0 prose-pre:bg-transparent prose-pre:p-0">
               <ReactMarkdown

@@ -17,10 +17,15 @@ export interface Settings {
   apiKey: string;
   apiBase: string;
   maxIterations: number;
+  themeMode: 'light' | 'dark' | 'love';
   braveApiKey?: string;
   search_provider?: string;
   telegramToken?: string;
   telegramEnabled?: boolean;
+  discordToken?: string;
+  discordEnabled?: boolean;
+  discordAllowFrom?: string[];
+  discordProxy?: string;
   user_name?: string;
   role_name?: string;
   emotionEnabled: boolean;

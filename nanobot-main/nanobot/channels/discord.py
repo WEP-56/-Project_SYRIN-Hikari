@@ -1,13 +1,18 @@
 """Discord channel implementation using Discord Gateway websocket."""
 
 import asyncio
+import inspect
 import json
+import os
+import socket
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import websockets
 from loguru import logger
+from python_socks.async_.asyncio import Proxy
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -32,6 +37,7 @@ class DiscordChannel(BaseChannel):
         self._heartbeat_task: asyncio.Task | None = None
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._http: httpx.AsyncClient | None = None
+        self._proxy_url: str | None = None
 
     async def start(self) -> None:
         """Start the Discord gateway connection."""
@@ -40,18 +46,72 @@ class DiscordChannel(BaseChannel):
             return
 
         self._running = True
-        self._http = httpx.AsyncClient(timeout=30.0)
+        self._proxy_url = (
+            self.config.proxy_url
+            or os.environ.get("DISCORD_PROXY")
+            or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+        )
+        client_kwargs: dict[str, Any] = {"timeout": 30.0}
+        if self._proxy_url:
+            logger.info(f"Discord proxy enabled: {self._proxy_url}")
+            params = inspect.signature(httpx.AsyncClient).parameters
+            if "proxy" in params:
+                client_kwargs["proxy"] = self._proxy_url
+            elif "proxies" in params:
+                client_kwargs["proxies"] = self._proxy_url
+            else:
+                if not os.environ.get("HTTPS_PROXY"):
+                    os.environ["HTTPS_PROXY"] = self._proxy_url
+                if not os.environ.get("HTTP_PROXY"):
+                    os.environ["HTTP_PROXY"] = self._proxy_url
+                client_kwargs["trust_env"] = True
+
+        self._http = httpx.AsyncClient(**client_kwargs)
+        await self._preflight_check()
 
         while self._running:
             try:
                 logger.info("Connecting to Discord gateway...")
-                async with websockets.connect(self.config.gateway_url) as ws:
+                connect_kwargs = dict(
+                    open_timeout=15,
+                    close_timeout=5,
+                    ping_interval=20,
+                    ping_timeout=20,
+                )
+                if self._proxy_url:
+                    params = inspect.signature(websockets.connect).parameters
+                    if "proxy" in params:
+                        connect_kwargs["proxy"] = self._proxy_url
+                    else:
+                        if "sock" in params:
+                            proxy_socket = await self._connect_proxy_socket()
+                            if proxy_socket:
+                                connect_kwargs["sock"] = proxy_socket
+                        else:
+                            logger.warning("websockets client proxy not supported in this version")
+
+                async with websockets.connect(self.config.gateway_url, **connect_kwargs) as ws:
                     self._ws = ws
                     await self._gateway_loop()
             except asyncio.CancelledError:
                 break
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(
+                    f"Discord gateway closed: code={e.code} reason={e.reason}"
+                )
+                if e.code == 4014:
+                    logger.error(
+                        "Discord privileged intents not enabled for this bot. "
+                        "Enable MESSAGE CONTENT intent in the Developer Portal or reduce intents."
+                    )
+            except TimeoutError:
+                logger.warning(
+                    "Discord gateway timeout during connect or heartbeat. "
+                    "This usually means the gateway is unreachable or blocked."
+                )
             except Exception as e:
-                logger.warning(f"Discord gateway error: {e}")
+                logger.warning(f"Discord gateway error: {type(e).__name__}: {e}")
                 if self._running:
                     logger.info("Reconnecting to Discord gateway in 5 seconds...")
                     await asyncio.sleep(5)
@@ -106,6 +166,63 @@ class DiscordChannel(BaseChannel):
                         await asyncio.sleep(1)
         finally:
             await self._stop_typing(msg.chat_id)
+
+    async def _preflight_check(self) -> None:
+        if not self._http:
+            return
+
+        headers = {"Authorization": f"Bot {self.config.token}"}
+        try:
+            response = await self._http.get(f"{DISCORD_API_BASE}/users/@me", headers=headers)
+            if response.status_code == 401:
+                logger.error("Discord token unauthorized. Check that you used Bot Token.")
+                return
+            if response.status_code == 403:
+                logger.error("Discord token forbidden. Check bot permissions and token scope.")
+                return
+            response.raise_for_status()
+            data = response.json()
+            username = data.get("username")
+            bot_id = data.get("id")
+            logger.info(f"Discord token OK: {username} ({bot_id})")
+        except Exception as e:
+            logger.warning(f"Discord preflight failed: {type(e).__name__}: {e}")
+
+        await self._probe_gateway_connectivity()
+
+    async def _probe_gateway_connectivity(self) -> None:
+        if self._proxy_url:
+            logger.info("Discord gateway probe skipped due to proxy configuration")
+            return
+
+        parsed = urlparse(self.config.gateway_url)
+        host = parsed.hostname or "gateway.discord.gg"
+        port = parsed.port or 443
+
+        try:
+            addrs = await asyncio.to_thread(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
+            targets = {addr[4][0] for addr in addrs}
+            logger.info(f"Discord gateway DNS OK: {host} -> {', '.join(sorted(targets))}")
+        except Exception as e:
+            logger.warning(f"Discord gateway DNS failed: {type(e).__name__}: {e}")
+            return
+
+        try:
+            await asyncio.to_thread(socket.create_connection, (host, port), 5)
+            logger.info(f"Discord gateway TCP OK: {host}:{port}")
+        except Exception as e:
+            logger.warning(f"Discord gateway TCP failed: {type(e).__name__}: {e}")
+
+    async def _connect_proxy_socket(self):
+        try:
+            parsed = urlparse(self.config.gateway_url)
+            host = parsed.hostname or "gateway.discord.gg"
+            port = parsed.port or 443
+            proxy = Proxy.from_url(self._proxy_url)
+            return await proxy.connect(dest_host=host, dest_port=port)
+        except Exception as e:
+            logger.warning(f"Discord proxy socket failed: {type(e).__name__}: {e}")
+            return None
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""

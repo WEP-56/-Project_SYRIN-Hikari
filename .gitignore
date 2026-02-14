@@ -27,6 +27,7 @@ AionUi-main
 test_workspace
 python-server/workspace/data/sessions
 REFACTOR_PLAN.md
+python-server/workspace/data
 
 # Logs
 *.log

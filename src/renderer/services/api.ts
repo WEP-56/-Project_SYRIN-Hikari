@@ -7,6 +7,7 @@ let baseURL = 'http://127.0.0.1:8888';
 if (typeof window !== 'undefined' && window.electronAPI) {
   window.electronAPI.getApiUrl().then((url) => {
     baseURL = url;
+    apiClient.defaults.baseURL = url;
   });
 }
 
@@ -16,6 +17,13 @@ const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+});
+
+apiClient.interceptors.request.use((config) => {
+  if (baseURL && config.baseURL !== baseURL) {
+    config.baseURL = baseURL;
+  }
+  return config;
 });
 
 export const api = {

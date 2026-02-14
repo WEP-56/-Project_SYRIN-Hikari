@@ -32,10 +32,12 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.providers.litellm_provider import LiteLLMProvider
-from nanobot.config.schema import Config, ExecToolConfig, TelegramConfig
+from nanobot.config.schema import Config, ExecToolConfig, TelegramConfig, DiscordConfig
 from nanobot.channels.telegram import TelegramChannel
+from nanobot.channels.discord import DiscordChannel
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJob
+from nanobot.session.manager import SessionManager
 
 # Import custom modules
 from tool_executor import ToolExecutor
@@ -93,6 +95,10 @@ class ConfigUpdate(BaseModel):
     search_provider: Optional[str] = None
     telegram_token: Optional[str] = None
     telegram_enabled: Optional[bool] = None
+    discord_token: Optional[str] = None
+    discord_enabled: Optional[bool] = None
+    discord_allow_from: Optional[List[str]] = None
+    discord_proxy: Optional[str] = None
     user_name: Optional[str] = None
     role_name: Optional[str] = None
     proactive_enabled: Optional[bool] = None
@@ -136,13 +142,19 @@ class ConfigManager:
             "api_base": "",
             "max_iterations": 20,
             "emotion_enabled": True,
-            "auto_execute": True,
+            "auto_execute": False,
             "enable_user_modeling": True,
             "brave_api_key": "",
             "search_provider": "brave",
             "telegram": {
                 "enabled": False,
                 "token": ""
+            },
+            "discord": {
+                "enabled": False,
+                "token": "",
+                "allow_from": [],
+                "proxy": ""
             },
             "user_name": "User",
             "role_name": "Assistant",
@@ -170,6 +182,23 @@ class ConfigManager:
             if "telegram_enabled" in updates:
                 tg_config["enabled"] = updates.pop("telegram_enabled")
             self._config["telegram"] = tg_config
+
+        if (
+            "discord_token" in updates
+            or "discord_enabled" in updates
+            or "discord_allow_from" in updates
+            or "discord_proxy" in updates
+        ):
+            dc_config = self._config.get("discord", {})
+            if "discord_token" in updates:
+                dc_config["token"] = updates.pop("discord_token")
+            if "discord_enabled" in updates:
+                dc_config["enabled"] = updates.pop("discord_enabled")
+            if "discord_allow_from" in updates:
+                dc_config["allow_from"] = updates.pop("discord_allow_from")
+            if "discord_proxy" in updates:
+                dc_config["proxy"] = updates.pop("discord_proxy")
+            self._config["discord"] = dc_config
             
         self._config.update(updates)
         self.save()
@@ -196,13 +225,14 @@ class AgentManager:
         self.provider: Optional[LiteLLMProvider] = None
         self.tool_executor: Optional[ToolExecutor] = None
         self.telegram_channel: Optional[TelegramChannel] = None
+        self.discord_channel: Optional[DiscordChannel] = None
         
         # Proactive Mode Services
         self.notification_queue: asyncio.Queue[OutboundMessage] = asyncio.Queue()
         self.cron_service: Optional[CronService] = None
         
         # Ensure IDENTITY.md is up-to-date
-        self.soul_manager.refresh_identity_file()
+        # self.soul_manager.refresh_identity_file()
         
         self._init_agent()
     
@@ -261,9 +291,16 @@ class AgentManager:
             
             self.provider = LiteLLMProvider(**provider_config)
             
+            # Setup Session Manager
+            self.session_manager = SessionManager(self.workspace)
+            
             # Setup Cron Service
-            cron_path = self.workspace / "cron.json"
-            self.cron_service = CronService(cron_path, on_job=self._handle_cron_job)
+            # CronService now requires (db, session_manager, on_job)
+            self.cron_service = CronService(
+                self.session_manager.db, 
+                self.session_manager, 
+                on_job=self._handle_cron_job
+            )
             
             # Setup exec config
             exec_config = ExecToolConfig(
@@ -283,6 +320,7 @@ class AgentManager:
                 user_name=config.get("user_name", "User"),
                 role_name=config.get("role_name", "Assistant"),
                 cron_service=self.cron_service,
+                session_manager=self.session_manager,
             )
             
             logger.info("Agent initialized successfully")
@@ -316,6 +354,27 @@ class AgentManager:
                     logger.info("Telegram channel started")
                 except Exception as e:
                     logger.error(f"Failed to start Telegram channel: {e}")
+
+            # Initialize Discord
+            dc_config = config.get("discord", {})
+            if dc_config.get("enabled") and dc_config.get("token"):
+                try:
+                    discord_config = DiscordConfig(
+                        enabled=True,
+                        token=dc_config["token"],
+                        allow_from=dc_config.get("allow_from", []),
+                        gateway_url=dc_config.get("gateway_url", DiscordConfig().gateway_url),
+                        intents=dc_config.get("intents", DiscordConfig().intents),
+                        proxy_url=dc_config.get("proxy", ""),
+                    )
+                    self.discord_channel = DiscordChannel(
+                        config=discord_config,
+                        bus=self.bus
+                    )
+                    asyncio.create_task(self.discord_channel.start())
+                    logger.info("Discord channel started")
+                except Exception as e:
+                    logger.error(f"Failed to start Discord channel: {e}")
             
             # Note: Background tasks are now started in start() method
             
@@ -329,6 +388,9 @@ class AgentManager:
         if self.telegram_channel:
             asyncio.create_task(self.telegram_channel.stop())
             self.telegram_channel = None
+        if self.discord_channel:
+            asyncio.create_task(self.discord_channel.stop())
+            self.discord_channel = None
             
         self._init_agent()
     
@@ -681,7 +743,20 @@ async def list_sessions():
     if not agent_manager or not agent_manager.agent:
         raise HTTPException(status_code=503, detail="Agent not initialized")
     
-    return {"sessions": agent_manager.agent.sessions.list_sessions()}
+    raw_sessions = agent_manager.agent.sessions.list_sessions()
+    sessions = []
+    
+    for s in raw_sessions:
+        # Only expose API sessions to the frontend
+        if s["id"].startswith("api:"):
+            # Create a copy to avoid modifying the cache/original if it's shared
+            session_data = s.copy()
+            # Strip the "api:" prefix for the frontend
+            session_data["id"] = s["id"][4:]
+            session_data["session_id"] = s["session_id"] # Internal ID, keep as is? Or irrelevant.
+            sessions.append(session_data)
+            
+    return {"sessions": sessions}
 
 
 @app.get("/sessions/{session_id}")
@@ -690,9 +765,12 @@ async def get_session(session_id: str):
     if not agent_manager or not agent_manager.agent:
         raise HTTPException(status_code=503, detail="Agent not initialized")
     
-    session = agent_manager.agent.sessions.get_or_create(session_id)
+    # Prepend api: prefix
+    key = f"api:{session_id}"
+    
+    session = agent_manager.agent.sessions.get_or_create(key)
     return {
-        "id": session.key,
+        "id": session_id, # Return stripped ID
         "messages": session.messages,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
@@ -707,7 +785,10 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=503, detail="Agent not initialized")
     
     try:
-        success = agent_manager.agent.sessions.delete_session(session_id)
+        # Prepend api: prefix
+        key = f"api:{session_id}"
+        
+        success = agent_manager.agent.sessions.delete_session(key)
         if not success:
             raise HTTPException(status_code=404, detail="Session not found")
         return {"success": True}
@@ -727,16 +808,19 @@ async def create_session(session: SessionCreate):
     if not agent_manager or not agent_manager.agent:
         raise HTTPException(status_code=503, detail="Agent not initialized")
     
-    # 强制创建新会话，不复用旧的 "default" 或其他逻辑
+    # Create new UUID for the session
     import uuid
-    new_key = str(uuid.uuid4())
+    new_uuid = str(uuid.uuid4())
     
-    new_session = agent_manager.agent.sessions.create_session(key=new_key, title=session.title)
+    # Use api: prefix for the key
+    key = f"api:{new_uuid}"
+    
+    new_session = agent_manager.agent.sessions.create_session(key=key, title=session.title)
     
     return {
         "success": True,
         "session": {
-            "id": new_session.key, # Frontend uses key as ID
+            "id": new_uuid, # Return UUID to frontend
             "title": new_session.metadata.get("title"),
             "created_at": new_session.created_at,
             "updated_at": new_session.updated_at
@@ -754,7 +838,10 @@ async def update_session(session_id: str, update: SessionUpdate):
     if not agent_manager or not agent_manager.agent:
         raise HTTPException(status_code=503, detail="Agent not initialized")
     
-    success = agent_manager.agent.sessions.update_session(session_id, title=update.title)
+    # Prepend api: prefix
+    key = f"api:{session_id}"
+    
+    success = agent_manager.agent.sessions.update_session(key, title=update.title)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -824,10 +911,24 @@ async def reset_system(confirm: bool = False):
              except Exception as e:
                 logger.error(f"Failed to delete cron jobs: {e}")
         
-        # 4. Reset User Profile/Soul (Optional? User said "ALL local data")
-        # Soul is in soul.json? No, usually managed by SoulManager
-        # Let's check SoulManager path
-        # Assuming soul_manager stores in workspace/soul/ ...
+        # 4. Reset User Profile/Soul
+        soul_db = agent_manager.workspace / "soul_db.json"
+        if soul_db.exists():
+             try:
+                soul_db.unlink()
+             except Exception as e:
+                logger.error(f"Failed to delete soul db: {e}")
+                
+        identity_file = agent_manager.workspace / "IDENTITY.md"
+        if identity_file.exists():
+             try:
+                identity_file.unlink()
+             except Exception as e:
+                logger.error(f"Failed to delete identity file: {e}")
+        
+        # Reload SoulManager to reflect empty state
+        agent_manager.soul_manager.state = agent_manager.soul_manager._load_state()
+        agent_manager.soul_manager.refresh_identity_file()
         
         return {"success": True, "message": "All local data has been nuked."}
         
@@ -936,6 +1037,8 @@ async def get_config():
         config["brave_api_key"] = "***"
     if config.get("telegram", {}).get("token"):
         config["telegram"]["token"] = "***"
+    if config.get("discord", {}).get("token"):
+        config["discord"]["token"] = "***"
     
     return config
 

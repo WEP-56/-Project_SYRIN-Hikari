@@ -24,15 +24,21 @@ export interface Settings {
   apiKey: string;
   apiBase: string;
   maxIterations: number;
+  themeMode: 'light' | 'dark' | 'love';
   braveApiKey?: string;
   search_provider?: string;
   telegramToken?: string;
   telegramEnabled?: boolean;
+  discordToken?: string;
+  discordEnabled?: boolean;
+  discordAllowFrom?: string[];
+  discordProxy?: string;
   user_name?: string;
   role_name?: string;
   emotionEnabled: boolean;
   autoExecute: boolean;
   enableUserModeling: boolean;
+  proactiveEnabled?: boolean;
 }
 
 interface AppState {
@@ -72,6 +78,7 @@ interface AppState {
   // Soul State
   soulState: any | null;
   loadSoulState: () => Promise<void>;
+  resetAll: () => Promise<void>;
 }
 
 export const useAppStore = create<AppState>()(
@@ -99,10 +106,15 @@ export const useAppStore = create<AppState>()(
         apiKey: '',
         apiBase: '',
         maxIterations: 20,
+        themeMode: 'light',
         braveApiKey: '',
         search_provider: 'brave',
         telegramToken: '',
         telegramEnabled: false,
+        discordToken: '',
+        discordEnabled: false,
+        discordAllowFrom: [],
+        discordProxy: '',
         user_name: 'User',
         role_name: 'Assistant',
         emotionEnabled: true,
@@ -144,6 +156,31 @@ export const useAppStore = create<AppState>()(
       loadSessions: async () => {
         const sessions = await api.getSessions();
         set({ sessions });
+        
+        // Validate currentSessionId
+        const { currentSessionId } = get();
+        
+        if (sessions.length === 0) {
+            // No sessions available, clear current session and messages
+            if (currentSessionId !== null) {
+                set({ currentSessionId: null, messages: [] });
+            }
+        } else {
+            // We have sessions
+            if (currentSessionId) {
+                // Check if current session still exists
+                const exists = sessions.some(s => s.id === currentSessionId);
+                if (!exists) {
+                    // Current session was deleted (or we are in invalid state), select the first one
+                    // Or set to null? User prefers empty state if they want to create new.
+                    // But if sessions exist, we should probably show one.
+                    // For now, let's select the first one to be safe and avoid "ghost" sessions.
+                    // WAIT: User's requirement is "Empty state if not selected".
+                    // But if it's invalid, we should deselect it.
+                    set({ currentSessionId: null, messages: [] });
+                }
+            }
+        }
       },
       
       createSession: async () => {
@@ -256,6 +293,21 @@ export const useAppStore = create<AppState>()(
             set({ currentEmotion: frontendEmotion });
           }
         }
+      },
+
+      resetAll: async () => {
+          await api.resetSystem();
+          // Clear local state
+          set({
+              messages: [],
+              sessions: [],
+              currentSessionId: null,
+              soulState: null,
+              currentEmotion: 'normal'
+          });
+          // Reload empty state
+          await get().loadSoulState();
+          await get().loadSessions();
       },
     }),
     {

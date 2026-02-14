@@ -17,10 +17,23 @@ export default function NormalMode() {
     sidebarOpen,
     toggleSidebar,
     soulSidebarOpen,
-    toggleSoulSidebar
+    toggleSoulSidebar,
+    settings
   } = useAppStore();
   
   const { emoji, color, label } = emotionConfig[currentEmotion] || emotionConfig['normal'];
+
+  const themeMode = settings?.themeMode || 'light';
+  const hearts = [
+    { left: '8%', top: '12%', size: 18, opacity: 0.35, delay: 0 },
+    { left: '20%', top: '70%', size: 12, opacity: 0.25, delay: 0.6 },
+    { left: '34%', top: '28%', size: 22, opacity: 0.3, delay: 1.2 },
+    { left: '48%', top: '55%', size: 14, opacity: 0.2, delay: 0.9 },
+    { left: '62%', top: '18%', size: 26, opacity: 0.35, delay: 0.3 },
+    { left: '72%', top: '72%', size: 16, opacity: 0.25, delay: 1.6 },
+    { left: '84%', top: '40%', size: 20, opacity: 0.3, delay: 0.8 },
+    { left: '90%', top: '15%', size: 12, opacity: 0.22, delay: 1.1 },
+  ];
 
   return (
     <motion.div
@@ -28,11 +41,29 @@ export default function NormalMode() {
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-      className="w-full h-full flex flex-col overflow-hidden rounded-xl bg-[#f5f5f5]"
+      className={`app-shell theme-${themeMode} w-full h-full flex flex-col overflow-hidden rounded-xl`}
     >
+      {themeMode === 'love' && (
+        <div className="love-hearts">
+          {hearts.map((h, i) => (
+            <span
+              key={i}
+              className="love-heart"
+              style={{
+                left: h.left,
+                top: h.top,
+                width: `${h.size}px`,
+                height: `${h.size}px`,
+                opacity: h.opacity,
+                animationDelay: `${h.delay}s`,
+              }}
+            />
+          ))}
+        </div>
+      )}
       {/* 标题栏 */}
       <header 
-        className="h-12 flex items-center justify-between px-4 relative z-50 border-b border-gray-100 bg-[#f5f5f5]"
+        className="app-titlebar h-12 flex items-center justify-between px-4 relative z-50 border-b"
         style={{ 
           // @ts-ignore
           WebkitAppRegion: 'drag' 
@@ -52,7 +83,7 @@ export default function NormalMode() {
 
           {/* 情绪表情 - 稍微缩小并移除强烈发光 */}
           <motion.div 
-            className="w-8 h-8 rounded-full flex items-center justify-center text-lg bg-white shadow-sm border border-gray-200"
+            className="app-emotion w-8 h-8 rounded-full flex items-center justify-center text-lg shadow-sm border"
             animate={{ 
               scale: [1, 1.1, 1],
               rotate: [0, -5, 5, 0]
@@ -68,7 +99,7 @@ export default function NormalMode() {
             </h1>
             <div className="flex items-center space-x-1.5 text-[10px] text-gray-500 leading-tight">
               <span 
-                className="px-1.5 rounded-full bg-gray-200 text-gray-600"
+              className="app-badge px-1.5 rounded-full"
               >
                 {label}
               </span>
@@ -122,9 +153,9 @@ export default function NormalMode() {
           <div className="flex items-center space-x-1">
             <button
               onClick={toggleSoulSidebar}
-              className={`p-1.5 rounded-md transition-colors no-drag mr-2 ${
-                soulSidebarOpen ? 'bg-pink-100 text-pink-600' : 'text-gray-500 hover:bg-pink-50 hover:text-pink-500'
-              }`}
+            className={`p-1.5 rounded-md transition-colors no-drag mr-2 ${
+              soulSidebarOpen ? 'bg-pink-100 text-pink-600' : 'text-gray-500 hover:bg-pink-50 hover:text-pink-500'
+            }`}
               title="情感状态"
             >
               <Heart size={16} />
@@ -150,6 +181,12 @@ export default function NormalMode() {
 
       {/* 主内容区 */}
       <main className="flex-1 overflow-hidden relative">
+        {connectionStatus !== 'connected' && (
+          <div className="startup-overlay">
+            <div className="startup-spinner" />
+            <div className="startup-text">正在启动后端服务</div>
+          </div>
+        )}
         <ErrorBoundary>
           <Sidebar />
         </ErrorBoundary>

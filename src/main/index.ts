@@ -34,6 +34,40 @@ const store = new Store<StoreSchema>({
 const API_PORT = 8888;
 const API_HOST = '127.0.0.1';
 
+// Helper to kill process on port (Windows only for now)
+function killProcessOnPort(port: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      const { exec } = require('child_process');
+      exec(`netstat -ano | findstr :${port}`, (err: any, stdout: string) => {
+        if (err || !stdout) {
+          resolve();
+          return;
+        }
+        const pids = new Set<string>();
+        const lines = stdout.trim().split('\n');
+        lines.forEach(line => {
+          const parts = line.trim().split(/\s+/);
+          const pid = parts[parts.length - 1];
+          if (pid && /^\d+$/.test(pid) && pid !== '0') {
+            pids.add(pid);
+          }
+        });
+        
+        if (pids.size === 0) {
+          resolve();
+          return;
+        }
+        
+        console.log(`[Main] Killing zombie processes on port ${port}: ${Array.from(pids).join(', ')}`);
+        exec(`taskkill /F /PID ${Array.from(pids).join(' /PID ')}`, () => resolve());
+      });
+    } else {
+      resolve();
+    }
+  });
+}
+
 // ============================================================================
 // Global State
 // ============================================================================
@@ -41,6 +75,50 @@ const API_HOST = '127.0.0.1';
 let mainWindow: BrowserWindow | null = null;
 let pythonProcess: ChildProcess | null = null;
 let isQuitting = false;
+
+app.disableHardwareAcceleration();
+
+const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
+
+function getRendererFilePath(): string {
+  return path.join(__dirname, '..', 'renderer', 'index.html');
+}
+
+async function waitForDevServer(url: string, timeoutMs: number = 10000): Promise<boolean> {
+  const start = Date.now();
+  return new Promise((resolve) => {
+    const http = require('http');
+    const attempt = () => {
+      const req = http.get(url, (res: any) => {
+        res.resume();
+        resolve(true);
+      }).on('error', () => {
+        if (Date.now() - start >= timeoutMs) {
+          resolve(false);
+          return;
+        }
+        setTimeout(attempt, 500);
+      });
+      req.setTimeout(2000, () => {
+        req.destroy();
+      });
+    };
+    attempt();
+  });
+}
+
+function resolveRendererTarget(): { type: 'url' | 'file'; value: string } {
+  if (app.isPackaged) {
+    return { type: 'file', value: getRendererFilePath() };
+  }
+  if (process.env.VITE_DEV_SERVER_URL) {
+    return { type: 'url', value: process.env.VITE_DEV_SERVER_URL };
+  }
+  if (fs.existsSync(getRendererFilePath())) {
+    return { type: 'file', value: getRendererFilePath() };
+  }
+  return { type: 'url', value: DEV_SERVER_URL };
+}
 
 // ============================================================================
 // Python Server Management
@@ -67,13 +145,14 @@ function getServerScriptPath(): string {
 }
 
 function startPythonServer(): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
+    // Kill any existing process on the API port to prevent connecting to a zombie process
+    await killProcessOnPort(API_PORT);
+
     const pythonPath = getPythonPath();
     const scriptPath = getServerScriptPath();
     
     console.log('Starting Python server...');
-    console.log(`Python: ${pythonPath}`);
-    console.log(`Script: ${scriptPath}`);
     
     if (!fs.existsSync(scriptPath)) {
       // 如果没有找到脚本，可能是因为 Python 环境问题，尝试直接 reject
@@ -134,7 +213,6 @@ function startPythonServer(): Promise<void> {
     function checkServerReady(text: string) {
       if (!serverReady && (text.includes('Uvicorn running') || text.includes('Application startup complete'))) {
         serverReady = true;
-        console.log('Python server is ready!');
         setTimeout(resolve, 1000); // Give it a moment to fully start
       }
     }
@@ -166,7 +244,6 @@ function startPythonServer(): Promise<void> {
       const req = http.get(`http://${API_HOST}:${API_PORT}/`, (res: any) => {
         if (res.statusCode === 200 && !serverReady) {
           serverReady = true;
-          console.log('Python server detected via HTTP health check!');
           setTimeout(resolve, 500);
         }
       }).on('error', () => {
@@ -204,8 +281,6 @@ function stopPythonServer(): Promise<void> {
       return;
     }
     
-    console.log('Stopping Python server...');
-    
     // Kill the process
     if (process.platform === 'win32') {
       spawn('taskkill', ['/pid', pythonProcess.pid!.toString(), '/f', '/t']);
@@ -227,21 +302,29 @@ function stopPythonServer(): Promise<void> {
 // Window Management
 // ============================================================================
 
-function createWindow(): void {
+async function createWindow(): Promise<void> {
   const bounds = store.get('windowBounds');
+  const primary = screen.getPrimaryDisplay().workArea;
+  const safeBounds = {
+    x: typeof bounds.x === 'number' ? bounds.x : primary.x + Math.floor((primary.width - bounds.width) / 2),
+    y: typeof bounds.y === 'number' ? bounds.y : primary.y + Math.floor((primary.height - bounds.height) / 2),
+    width: bounds.width,
+    height: bounds.height
+  };
   
   mainWindow = new BrowserWindow({
-    x: bounds.x,
-    y: bounds.y,
-    width: bounds.width,
-    height: bounds.height,
+    x: safeBounds.x,
+    y: safeBounds.y,
+    width: safeBounds.width,
+    height: safeBounds.height,
     minWidth: 900,
     minHeight: 600,
     show: false,
     title: 'Hikari',
     autoHideMenuBar: true,
-    frame: false, // Frameless for custom titlebar
-    transparent: true, // Transparent for rounded corners
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       sandbox: false,
@@ -251,13 +334,18 @@ function createWindow(): void {
     },
   });
 
-  mainWindow.webContents.openDevTools(); // Force open DevTools for debugging
-
-  // Load content
-  if (app.isPackaged) {
-    mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  const rendererTarget = resolveRendererTarget();
+  if (rendererTarget.type === 'url') {
+    const ready = await waitForDevServer(rendererTarget.value, 15000);
+    if (ready) {
+      mainWindow.loadURL(rendererTarget.value);
+    } else if (fs.existsSync(getRendererFilePath())) {
+      mainWindow.loadFile(getRendererFilePath());
+    } else {
+      mainWindow.loadURL(rendererTarget.value);
+    }
   } else {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadFile(rendererTarget.value);
   }
   
   // Window events
@@ -270,13 +358,8 @@ function createWindow(): void {
     }
   });
 
-  // Fix for transparency issue on Windows where background becomes opaque on blur
-  mainWindow.on('blur', () => {
-    mainWindow?.setBackgroundColor('#00000000');
-  });
-
   mainWindow.on('focus', () => {
-    mainWindow?.setBackgroundColor('#00000000');
+    mainWindow?.show();
   });
   
   mainWindow.on('close', () => {
@@ -304,6 +387,7 @@ function createWindow(): void {
 ipcMain.handle('get-app-version', () => {
   return app.getVersion();
 });
+
 
 ipcMain.handle('get-api-url', () => {
   return `http://${API_HOST}:${API_PORT}`;
@@ -360,23 +444,15 @@ ipcMain.handle('close-window', () => {
 // ============================================================================
 
 app.whenReady().then(async () => {
-  console.log('App is ready');
-  
   try {
-    // Start Python server first
+    await createWindow();
     await startPythonServer();
-    console.log('Python server started successfully');
-    
-    // Then create window
-    createWindow();
-    
   } catch (error) {
     console.error('Failed to start:', error);
     dialog.showErrorBox(
       '启动失败',
       `无法启动后端服务：${(error as Error).message}\n\n请确保已安装 Python 和必要的依赖。`
     );
-    app.quit();
   }
 });
 

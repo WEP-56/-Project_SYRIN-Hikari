@@ -28,8 +28,14 @@ class MemoryStore:
     
     def __init__(self, workspace: Path):
         self.db_path = workspace / "yandere_memory.db"
-        self._init_db()
+        # Lazy initialization: Do not create DB file immediately
+        # self._init_db()
     
+    def _ensure_initialized(self):
+        """Ensure DB is initialized before use"""
+        if not self.db_path.exists():
+            self._init_db()
+
     def _init_db(self):
         """初始化数据库"""
         try:
@@ -79,6 +85,7 @@ class MemoryStore:
         Returns:
             记忆 ID
         """
+        self._ensure_initialized()
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -115,6 +122,7 @@ class MemoryStore:
         type_filter: Optional[str] = None
     ) -> List[Memory]:
         """获取最近的记忆"""
+        self._ensure_initialized()
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -157,6 +165,7 @@ class MemoryStore:
     
     def get_important_memories(self, min_importance: int = 7, limit: int = 20) -> List[Memory]:
         """获取重要记忆"""
+        self._ensure_initialized()
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -191,6 +200,7 @@ class MemoryStore:
     
     def search_memories(self, keyword: str, limit: int = 20) -> List[Memory]:
         """搜索记忆"""
+        self._ensure_initialized()
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -225,6 +235,7 @@ class MemoryStore:
     
     def delete_old_memories(self, days: int = 30):
         """删除旧记忆"""
+        self._ensure_initialized()
         try:
             cutoff_time = datetime.now().timestamp() - (days * 24 * 3600)
             
